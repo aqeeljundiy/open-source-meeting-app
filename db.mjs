@@ -194,6 +194,14 @@ for (const [name, type] of [['overview', 'TEXT'], ['overview_at', 'TEXT']]) {
   if (!fcols.has(name)) db.exec(`ALTER TABLE folders ADD COLUMN ${name} ${type}`);
 }
 
+// Public share links for single meetings (read-only page at /s/<token>).
+{
+  const mc = new Set(db.prepare(`PRAGMA table_info(meetings)`).all().map((c) => c.name));
+  if (!mc.has('share_token')) db.exec(`ALTER TABLE meetings ADD COLUMN share_token TEXT`);
+  if (!mc.has('share_opts')) db.exec(`ALTER TABLE meetings ADD COLUMN share_opts TEXT`);
+  db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS meetings_share ON meetings(share_token) WHERE share_token IS NOT NULL`);
+}
+
 // Per-workspace bot name (falls back to BOT_NAME / the brand's bot name).
 if (!db.prepare(`PRAGMA table_info(workspaces)`).all().some((c) => c.name === 'bot_name')) db.exec(`ALTER TABLE workspaces ADD COLUMN bot_name TEXT`);
 

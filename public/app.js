@@ -672,12 +672,14 @@ function renderMeeting(m, members, fresh) {
   $('#mActions').innerHTML = `
     ${edit && m.live && !['stopping', 'processing'].includes(m.status) ? '<button class="btn btn-sm" id="stop">Make bot leave</button>' : ''}
     ${edit && !m.live && (m.utterances.length || m.recording) && m.status !== 'processing' ? `<button class="btn btn-sm" id="renotes" title="Ask ${esc(aiName())} to write the summary and tasks again from the transcript">Regenerate notes</button>` : ''}
+    ${edit ? `<button class="btn btn-sm" id="shareBtn">${m.share ? 'Shared' : 'Share'}</button>` : ''}
     ${edit ? '<button class="btn btn-sm btn-danger" id="del">Delete</button>' : ''}`;
   $('#stop')?.addEventListener('click', attempt(async () => { await api(`/api/meetings/${m.id}/stop`, { method: 'POST' }); route(); }));
   $('#renotes')?.addEventListener('click', attempt(async () => {
     if (!confirm('Regenerate the summary and tasks from the transcript? Tasks you edited are kept.')) return;
     await api(`/api/meetings/${m.id}/notes`, { method: 'POST' }); route();
   }));
+  $('#shareBtn')?.addEventListener('click', () => openShare(m));
   $('#del')?.addEventListener('click', attempt(async () => {
     if (!confirm('Delete this meeting, its recording, transcript and tasks?')) return;
     await api(`/api/meetings/${m.id}`, { method: 'DELETE' });
@@ -1067,6 +1069,8 @@ async function route() {
   clearTimeout(pollTimer);
   animateNext = true;
   const p = location.pathname;
+  const shared = p.match(/^\/s\/([\w-]{16,})$/);
+  if (shared) return viewShared(shared[1]);
   if (p !== '/login' && p !== '/signup' && !me) {
     try { await refreshShell(); } catch { return; }
   }
@@ -1089,6 +1093,86 @@ async function route() {
     viewMissing();
   } catch (e) {
     if (me) toast(e.message, true);
+  }
+}
+
+// ---------- sharing ----------
+function openShare(m) {
+  const d = document.createElement('dialog');
+  d.className = 'modal';
+  const render = () => {
+    const sh = m.share;
+    d.innerHTML = `<form method="dialog" class="share-form">
+      <h2>Share this meeting</h2>
+      <p class="muted">Anyone with the link can view a read-only page: summary and tasks, plus the parts you allow below. No login needed.</p>
+      <label class="switch-row"><span><b>Include transcript</b><small>The full conversation, line by line</small></span>
+        <span class="switch"><input type="checkbox" name="transcript" ${sh ? (sh.opts.transcript ? 'checked' : '') : 'checked'}><span></span></span></label>
+      <label class="switch-row"><span><b>Include recording</b><small>${m.recording ? 'The meeting video' : 'This meeting has no recording'}</small></span>
+        <span class="switch"><input type="checkbox" name="video" ${m.recording ? '' : 'disabled'} ${sh ? (sh.opts.video ? 'checked' : '') : (m.recording ? 'checked' : '')}><span></span></span></label>
+      ${sh ? `<div class="share-link"><input readonly value="${esc(sh.url)}" aria-label="Share link"><button type="button" class="btn btn-sm btn-blue" id="copyShare">Copy link</button></div>` : ''}
+      <p class="form-error" id="shareErr"></p>
+      <div class="row-end">
+        ${sh ? '<button type="button" class="btn btn-danger" id="stopShare">Turn off link</button>' : ''}
+        <button type="button" class="btn" id="closeShare">Close</button>
+        <button type="button" class="btn btn-blue" id="saveShare">${sh ? 'Save' : 'Create link'}</button>
+      </div>
+    </form>`;
+    const f = $('form', d);
+    $('#closeShare', d).onclick = () => closeAnimated(d);
+    $('#saveShare', d).onclick = attempt(async () => {
+      const r = await api(`/api/meetings/${m.id}/share`, { body: { transcript: f.transcript.checked, video: f.video.checked } });
+      m.share = { url: r.url.startsWith('http') ? r.url : location.origin + r.url, opts: r.opts };
+      render(); toast('Link ready');
+    });
+    $('#copyShare', d)?.addEventListener('click', attempt(async () => { await navigator.clipboard.writeText(m.share.url); toast('Link copied'); }));
+    $('#stopShare', d)?.addEventListener('click', attempt(async () => {
+      if (!confirm('Turn off this link? People who have it will no longer see the meeting.')) return;
+      await api(`/api/meetings/${m.id}/share`, { method: 'DELETE' });
+      m.share = null; render(); toast('Link turned off');
+    }));
+  };
+  if (m.share && !m.share.url.startsWith('http')) m.share.url = location.origin + m.share.url;
+  render();
+  document.body.appendChild(d);
+  d.showModal();
+  d.addEventListener('cancel', (e) => { e.preventDefault(); closeAnimated(d); });
+  d.addEventListener('close', () => { d.remove(); if ($('#shareBtn')) $('#shareBtn').textContent = m.share ? 'Shared' : 'Share'; });
+}
+
+// Public read-only meeting page (/s/<token>), no login, no sidebar.
+async function viewShared(token) {
+  $('#askFab')?.remove(); $('#askPanel')?.remove();
+  sideSig = '';
+  const r = await fetch(`/api/share/${token}`);
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) {
+    $('#root').innerHTML = `<div class="auth enter"><a class="brand">${brandMark()}</a><div class="card auth-card"><h1>Link unavailable</h1><p class="muted">${esc(data.error || 'This link is not valid.')}</p></div></div>`;
+    return;
+  }
+  document.title = `${data.title} · ${BRAND.name}`;
+  const n = data.summary;
+  const list = (items) => items?.length ? `<ul>${items.map((i) => `<li>${esc(i)}</li>`).join('')}</ul>` : '<p class="muted">None</p>';
+  $('#root').innerHTML = `
+    <div class="shared enter">
+      <header class="shared-top"><span class="brand">${brandMark()}</span><span class="muted small">Shared meeting · read only</span></header>
+      <main class="shared-main">
+        <h1>${esc(data.title)}</h1>
+        <p class="muted">${when(data.date)}${data.minutes ? ` · ${data.minutes} min` : ''}${data.people.length ? ` · ${data.people.map(esc).join(', ')}` : ''}</p>
+        ${data.video ? `<div class="card video-card"><video id="video" controls preload="metadata" src="${esc(data.video)}"></video></div>` : ''}
+        <div class="card notes">
+          ${n ? `<p class="lead">${esc(n.summary)}</p>
+            <section><h3>Key points</h3>${list(n.key_points)}</section>
+            <section><h3>Decisions</h3>${list(n.decisions)}</section>
+            <section><h3>Open questions</h3>${list(n.open_questions)}</section>` : '<p class="muted">No summary for this meeting.</p>'}
+        </div>
+        ${data.tasks.length ? `<div class="card"><h2>Action items</h2>${data.tasks.map((t) => `<div class="shared-task ${t.done ? 'done' : ''}"><span class="tick">${t.done ? '✓' : ''}</span><span>${esc(t.title)}${t.owner ? ` <span class="muted">· ${esc(t.owner)}</span>` : ''}${t.due ? ` <span class="muted">· ${esc(t.due)}</span>` : ''}</span></div>`).join('')}</div>` : ''}
+        ${data.transcript ? `<div class="card"><h2>Transcript</h2><div class="transcript">${data.transcript.map((u) => `<div class="utt" data-t="${u.t_ms}"><time>${mmss(u.t_ms)}</time><div><b>${esc(u.speaker || 'Unknown')}</b>${esc(u.text)}</div></div>`).join('')}</div></div>` : ''}
+      </main>
+    </div>`;
+  const v = $('#video');
+  if (v) {
+    v.addEventListener('loadedmetadata', () => { if (v.duration === Infinity) { v.addEventListener('timeupdate', function back() { v.removeEventListener('timeupdate', back); v.currentTime = 0; }); v.currentTime = 1e101; } });
+    $$('.utt').forEach((u) => u.onclick = () => { v.currentTime = Number(u.dataset.t) / 1000; v.play(); });
   }
 }
 

@@ -94,6 +94,7 @@ function meetingDetail(m) {
     utterances: q.utterances.all(m.id),
     events: q.events.all(m.id),
     tasks: q.meetingTasks.all(m.id),
+    share: m.share_token ? { url: `${(process.env.PUBLIC_URL || '').replace(/\/$/, '')}/s/${m.share_token}`, opts: JSON.parse(m.share_opts || '{}') } : null,
     live: bots.has(m.id),
   };
 }
@@ -401,6 +402,41 @@ on('POST', '/api/calendar/events/:id/send', (ctx, p) => {
   return { id };
 }, { role: 'member' });
 
+// Share links: anyone with /s/<token> sees a read-only page of one meeting.
+on('POST', '/api/meetings/:id/share', (ctx, p, body) => {
+  const m = ownMeeting(ctx, p.id);
+  const token = m.share_token || randomBytes(18).toString('base64url');
+  const opts = { transcript: body.transcript !== false, video: body.video !== false };
+  db.prepare(`UPDATE meetings SET share_token = ?, share_opts = ? WHERE id = ?`).run(token, JSON.stringify(opts), m.id);
+  const base = (process.env.PUBLIC_URL || '').replace(/\/$/, '');
+  return { token, opts, url: `${base}/s/${token}` };
+}, { role: 'member' });
+
+on('DELETE', '/api/meetings/:id/share', (ctx, p) => {
+  const m = ownMeeting(ctx, p.id);
+  db.prepare(`UPDATE meetings SET share_token = NULL, share_opts = NULL WHERE id = ?`).run(m.id);
+  return { ok: true };
+}, { role: 'member' });
+
+// Public: the shared page's data. Names only (no emails), no bot log, no internal ids.
+on('GET', '/api/share/:token', (ctx, p) => {
+  if (p.token.length < 16) throw new HttpError(404, 'This link is not valid');
+  const m = db.prepare(`SELECT * FROM meetings WHERE share_token = ?`).get(p.token);
+  if (!m) throw new HttpError(404, 'This link is not valid or was turned off');
+  const opts = JSON.parse(m.share_opts || '{}');
+  const n = m.summary ? JSON.parse(m.summary) : null;
+  return {
+    title: n?.title || m.title || 'Meeting',
+    date: m.started_at || m.created_at,
+    minutes: m.started_at && m.ended_at ? Math.max(1, Math.round((Date.parse(m.ended_at + 'Z') - Date.parse(m.started_at + 'Z')) / 60000)) : null,
+    people: m.attendees ? JSON.parse(m.attendees).map((a) => a.name || a.email.split('@')[0]) : [...new Set(q.utterances.all(m.id).map((u) => u.speaker).filter(Boolean))],
+    summary: n ? { summary: n.summary, key_points: n.key_points, decisions: n.decisions, open_questions: n.open_questions, topics: n.topics } : null,
+    tasks: q.meetingTasks.all(m.id).map((t) => ({ title: t.title, owner: t.assignee_name || t.owner_name || null, due: t.due, done: t.status === 'done' })),
+    transcript: opts.transcript ? q.utterances.all(m.id) : null,
+    video: opts.video && m.recording ? `/s/${p.token}/video` : null,
+  };
+}, { public: true });
+
 // Folders
 on('GET', '/api/folders', (ctx) => ({
   folders: q.folders.all(ctx.workspace.id),
@@ -613,10 +649,13 @@ on('DELETE', '/api/tasks/:id', (ctx, p) => {
 // ---------- server ----------
 function serveRecording(req, res, ctx, file) {
   const m = db.prepare(`SELECT workspace_id FROM meetings WHERE recording = ?`).get(file);
+  if (!ctx?.workspace || !m || m.workspace_id !== ctx.workspace.id) return json(res, 404, { error: 'Not found' });
+  streamWebm(req, res, file);
+}
+
+function streamWebm(req, res, file) {
   const path = join(REC_DIR, file);
-  if (!ctx?.workspace || !m || m.workspace_id !== ctx.workspace.id || !/^[\w-]+\.webm$/.test(file) || !existsSync(path)) {
-    return json(res, 404, { error: 'Not found' });
-  }
+  if (!/^[\w-]+\.webm$/.test(file) || !existsSync(path)) return json(res, 404, { error: 'Not found' });
   const size = statSync(path).size;
   const range = req.headers.range?.match(/bytes=(\d*)-(\d*)/);
   if (range) {
@@ -661,6 +700,14 @@ async function handle(req, res) {
 
   const rec = path.match(/^\/recordings\/([^/]+)$/);
   if (rec) return serveRecording(req, res, ctx, rec[1]);
+
+  // Shared meeting recording (only if the share link allows video).
+  const sv = path.match(/^\/s\/([\w-]{16,})\/video$/);
+  if (sv) {
+    const m = db.prepare(`SELECT recording, share_opts FROM meetings WHERE share_token = ?`).get(sv[1]);
+    if (!m?.recording || !JSON.parse(m.share_opts || '{}').video) return json(res, 404, { error: 'Not found' });
+    return streamWebm(req, res, m.recording);
+  }
 
   // Static assets, else the single-page app (it routes on the client).
   const file = path.slice(1);
