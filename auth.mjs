@@ -85,8 +85,11 @@ export function emailAllowed(email) {
 }
 export const domainError = () => `Only ${allowedDomains().map((d) => `@${d}`).join(' / ')} accounts can use this app`;
 
+// Who may create an account: anyone with OPEN_SIGNUP=1; the very first account; invited emails;
+// and, when ALLOWED_EMAIL_DOMAINS is set, anyone from those company domains (no invite needed).
 export function signupAllowed(email) {
-  return process.env.OPEN_SIGNUP === '1' || countUsers.get().n === 0 || Boolean(hasInvite.get(email.toLowerCase()));
+  return process.env.OPEN_SIGNUP === '1' || countUsers.get().n === 0 || Boolean(hasInvite.get(email.toLowerCase()))
+    || (allowedDomains().length > 0 && emailAllowed(email));
 }
 
 export function login({ email, password }) {

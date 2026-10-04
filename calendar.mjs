@@ -3,10 +3,10 @@ import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID }
 import { db, q, detectPlatform } from './db.mjs';
 import { homeWorkspace, signupAllowed, emailAllowed, domainError, allowedDomains } from './auth.mjs';
 
-const SCOPES = [
-  'openid', 'email', 'profile',
-  'https://www.googleapis.com/auth/calendar.events.readonly',
-];
+// Sign-in asks only for basic profile scopes (no Google review needed, so the Google app can be
+// published for everyone). Calendar access is asked separately, only when connecting a calendar.
+const LOGIN_SCOPES = ['openid', 'email', 'profile'];
+const CALENDAR_SCOPES = [...LOGIN_SCOPES, 'https://www.googleapis.com/auth/calendar.events.readonly'];
 const SYNC_EVERY_MS = 3 * 60_000;
 const LOOKAHEAD_MS = 7 * 86400_000;
 const JOIN_LEAD_MS = 60_000;          // send the bot 1 minute before start
@@ -35,15 +35,15 @@ function open(sealed) {
 }
 
 // ---------- OAuth ----------
-export function authUrl(state) {
+export function authUrl(state, { calendar = false } = {}) {
   const u = new URL('https://accounts.google.com/o/oauth2/v2/auth');
   u.search = new URLSearchParams({
     client_id: process.env.GOOGLE_CLIENT_ID,
     redirect_uri: redirectUri(),
     response_type: 'code',
-    scope: SCOPES.join(' '),
-    access_type: 'offline',          // refresh token, so we can read the calendar later
-    prompt: 'consent',               // always return a refresh token
+    scope: (calendar ? CALENDAR_SCOPES : LOGIN_SCOPES).join(' '),
+    // Calendar needs a refresh token (offline + consent); plain sign-in doesn't.
+    ...(calendar ? { access_type: 'offline', prompt: 'consent' } : { prompt: 'select_account' }),
     include_granted_scopes: 'true',
     // Show only accounts from the company domain in Google's account picker.
     ...(allowedDomains().length === 1 ? { hd: allowedDomains()[0] } : {}),

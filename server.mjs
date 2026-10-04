@@ -141,7 +141,7 @@ on('GET', '/api/auth/google/start', (ctx, p, body, req, res) => {
   const connect = new URL(req.url, 'http://x').searchParams.get('connect') === '1' && ctx ? '1' : '0';
   const state = `${randomBytes(16).toString('hex')}.${connect}`;
   res.writeHead(302, {
-    Location: cal.authUrl(state),
+    Location: cal.authUrl(state, { calendar: connect === '1' }),
     'Set-Cookie': `mb_oauth=${state}; Path=/api/auth/google; HttpOnly; SameSite=Lax; Max-Age=600${process.env.COOKIE_SECURE === '1' ? '; Secure' : ''}`,
   });
   res.end();
