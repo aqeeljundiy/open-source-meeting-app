@@ -525,3 +525,4 @@ video { width: 100%; border-radius: 14px; background: #000; aspect-ratio: 16/9; 
 .shared-task .tick { width: 18px; height: 18px; flex: none; border-radius: 5px; border: 1.5px solid var(--border); display: grid; place-items: center; font-size: 12px; color: var(--btn-text); margin-top: 2px; }
 .shared-task.done .tick { background: var(--accent); border-color: var(--accent); }
 .shared-task.done > span:last-child { text-decoration: line-through; color: var(--muted); }
+.shared .notes .lead { margin: 0 0 18px; }
