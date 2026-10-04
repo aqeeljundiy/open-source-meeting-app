@@ -91,7 +91,11 @@ export function matchMember(name, members, attendees = []) {
 
 // Rules first (participants / keywords the user taught us), then the AI's suggestion.
 export function fileMeeting(m, notes, log) {
-  if (m.folder_id && m.filed_by === 'user') return; // user already chose
+  if (m.folder_id && m.filed_by === 'user') {
+    // The user already chose the folder: keep it, but still record type and tags.
+    q.setFiling.run(m.folder_id, 'user', notes.meeting_type, JSON.stringify(notes.tags || []), m.id);
+    return;
+  }
   const speakers = q.speakers.all(m.id).map((r) => r.speaker.toLowerCase());
   const haystack = `${m.title || ''} ${notes.title} ${notes.summary}`.toLowerCase();
   const domains = (m.attendees ? JSON.parse(m.attendees) : []).map((a) => a.email?.split('@')[1]?.toLowerCase()).filter(Boolean);

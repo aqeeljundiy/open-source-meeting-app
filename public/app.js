@@ -80,6 +80,7 @@ function shell(active, content) {
     moveIndicator();
     $('#side').classList.remove('open');
     setView(content);
+    afterShell();
     return;
   }
   sideSig = sig;
@@ -102,6 +103,7 @@ ${me.singleWorkspace ? '' : `      <label class="ws">
         ${link('/', 'Meetings', ICON.meet)}
         ${link('/upcoming', 'Upcoming', ICON.cal)}
         ${link('/tasks', 'Tasks', ICON.task)}
+        <button class="nav nav-ask" type="button" data-ask>${ICON.spark}<span>Ask AI</span></button>
         <div class="nav-head"><span>Folders</span>${canEdit() ? '<button class="icon-btn" id="newFolder" aria-label="New folder">+</button>' : ''}</div>
         ${folders.folders.map((f) => link(`/folders/${f.id}`, esc(f.name), dot(f.color), `<em>${f.meeting_count}</em>`)).join('')}
         ${link('/folders/none', 'Unfiled', dot('gray'), `<em>${folders.unfiled}</em>`)}
@@ -119,6 +121,7 @@ ${me.singleWorkspace ? '' : `      <label class="ws">
   </div>`;
 
   setView(content);
+  afterShell();
   requestAnimationFrame(() => moveIndicator(true));
   $('#openSide')?.addEventListener('click', () => $('#side').classList.add('open'));
   $('#closeSide')?.addEventListener('click', () => $('#side').classList.remove('open'));
@@ -172,6 +175,10 @@ function moveIndicator(instant = false) {
 }
 
 const ICON = {
+  spark: '<svg viewBox="0 0 24 24" class="ic"><path d="M12 3l1.8 4.9L19 9.7l-5.2 1.8L12 16.5l-1.8-5L5 9.7l5.2-1.8z"/><path d="M19 15l.8 2.2L22 18l-2.2.8L19 21l-.8-2.2L16 18l2.2-.8z"/></svg>',
+  send: '<svg viewBox="0 0 24 24" class="ic"><path d="M4 12l16-8-6 16-2.5-6.5z"/></svg>',
+  history: '<svg viewBox="0 0 24 24" class="ic"><path d="M3 12a9 9 0 1 0 3-6.7L3 8"/><path d="M3 3v5h5M12 7v5l3 2"/></svg>',
+  plus: '<svg viewBox="0 0 24 24" class="ic"><path d="M12 5v14M5 12h14"/></svg>',
   cal: '<svg viewBox="0 0 24 24" class="ic"><rect x="3.5" y="5" width="17" height="15" rx="3"/><path d="M3.5 10h17M8 3v4M16 3v4"/></svg>',
   google: '<svg viewBox="0 0 48 48" width="18" height="18" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.2 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2c-2 1.5-4.5 2.4-7.2 2.4-5.2 0-9.6-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z"/></svg>',
   meet: '<svg viewBox="0 0 24 24" class="ic"><rect x="3" y="6" width="13" height="12" rx="3"/><path d="M16 10l5-3v10l-5-3z"/></svg>',
@@ -221,6 +228,7 @@ function closeAnimated(d) {
 
 // ---------- auth ----------
 async function viewAuth(mode) {
+  $('#askFab')?.remove(); $('#askPanel')?.remove(); ask.open = false; document.body.classList.remove('ask-open');
   const cfg = await fetch('/api/auth/config').then((r) => r.json()).catch(() => ({}));
   const err = new URLSearchParams(location.search).get('error');
   sideSig = '';
@@ -860,6 +868,7 @@ async function viewSettings() {
         ${me.singleWorkspace ? '' : '<p class="muted small">Use one workspace per company or team. Meetings, folders and tasks stay inside their workspace.</p>'}
       </section>
       <section class="card" id="aiCard"><h2>AI</h2><p class="muted">Loading…</p></section>
+      ${owner ? '<section class="card" id="demoCard" hidden></section>' : ''}
       <section class="card">
         <h2>Meeting bot</h2>
         <form id="botForm" class="inline-add"><input name="bot_name" value="${esc(me.botName)}" placeholder="${esc(me.defaultBotName)}" maxlength="40" ${owner ? '' : 'disabled'} aria-label="Bot name">${owner ? '<button class="btn btn-sm">Save</button>' : ''}</form>
@@ -904,6 +913,7 @@ async function viewSettings() {
     </div>`);
 
   renderAICard(owner);
+  if (owner) renderDemoCard();
   api('/api/calendar').then((c) => {
     $('#calCard').innerHTML = `<h2>Google Calendar</h2>${c.connected
       ? `<p>Connected as <b>${esc(c.account.email)}</b>. Auto-join: ${AUTO[c.account.auto_join]}. Meetings are saved in ${esc(c.account.workspace_name || '—')}.</p>
@@ -939,6 +949,29 @@ async function viewSettings() {
     await api(`/api/folders/${fd.get('folder')}`, { method: 'PATCH', body: { keyword: fd.get('keyword') } });
     await refreshShell(); route(); toast('Rule added');
   }));
+}
+
+// Demo clients: shown only when the install has demo files (demos/*.json).
+async function renderDemoCard() {
+  const card = $('#demoCard');
+  if (!card) return;
+  const d = await api('/api/demos').catch(() => null);
+  if (!d?.demos.length) return;
+  card.hidden = false;
+  const s = d.status;
+  const running = s && !s.done;
+  card.innerHTML = `
+    <h2>Demo client</h2>
+    <p class="muted small">Loads a fictional client folder with realistic meetings, written by your AI (uses a few cents of AI credit). Delete the folder any time to remove it.</p>
+    ${d.demos.map((x) => `<div class="person"><span class="person-main"><b>${esc(x.title)}</b><small>${x.meetings} meetings · folder “${esc(x.folder)}”</small></span>
+      <button class="btn btn-sm" data-demo="${esc(x.name)}" ${running ? 'disabled' : ''}>Load</button></div>`).join('')}
+    ${s ? `<p class="small ${s.error ? 'bad' : 'muted'}" style="margin:10px 0 0">${s.error ? `Stopped: ${esc(s.error)}` : s.done ? `Loaded “${esc(s.demo)}”. ${s.folderId ? `<a href="/folders/${s.folderId}">Open the folder</a>` : ''}` : `${esc(s.step)}…`}</p>` : ''}
+    ${running ? `<div class="bar" style="margin-top:8px"><i style="width:${Math.round((s.current - 1) / s.total * 100)}%"></i></div>` : ''}`;
+  $$('[data-demo]', card).forEach((b) => b.onclick = attempt(async () => {
+    await api(`/api/demos/${b.dataset.demo}/load`, { method: 'POST' });
+    renderDemoCard();
+  }));
+  if (running) setTimeout(async () => { if (location.pathname === '/settings') { await renderDemoCard(); if (!(await api('/api/demos')).status?.done) return; await refreshShell(); } }, 3000);
 }
 
 const keyPlaceholder = (p) => p.savedKey ? `Saved: ${p.savedKey} (leave empty to keep)` : p.serverKey ? 'Using the server key (paste one to override)' : p.keyHint;
@@ -1043,5 +1076,161 @@ async function route() {
     if (me) toast(e.message, true);
   }
 }
+
+// ---------- Ask AI ----------
+function afterShell() {
+  mountAsk();
+  if (ask.open) setTimeout(syncAskScope, 0);   // after the page set document.title
+}
+// A chat drawer that lives outside the page views, so it stays open while you navigate.
+const ask = { open: false, chatId: null, messages: [], refs: {}, busy: false, scope: null };
+
+function routeScope() {
+  const p = location.pathname;
+  let m;
+  if ((m = p.match(/^\/m\/([\w-]+)/))) return { type: 'meeting', id: m[1], label: document.title || 'This meeting' };
+  if ((m = p.match(/^\/folders\/([\w-]+)/)) && m[1] !== 'none') {
+    const f = folders.folders.find((x) => x.id === m[1]);
+    return { type: 'folder', id: m[1], label: f ? f.name : 'This folder' };
+  }
+  return null;
+}
+
+function mountAsk() {
+  if ($('#askFab') || !me?.workspace) return;
+  document.body.insertAdjacentHTML('beforeend', `
+    <button class="ask-fab" id="askFab" type="button" aria-label="Ask AI">${ICON.spark}<span>Ask AI</span></button>
+    <aside class="ask-panel" id="askPanel" aria-label="Ask AI" hidden>
+      <header class="ask-head">
+        <div class="ask-title">${ICON.spark}<b>Ask AI</b></div>
+        <div class="ask-tools">
+          <button class="icon-btn" id="askHistory" title="Past chats" aria-label="Past chats">${ICON.history}</button>
+          <button class="icon-btn" id="askNew" title="New chat" aria-label="New chat">${ICON.plus}</button>
+          <button class="icon-btn" id="askClose" aria-label="Close">✕</button>
+        </div>
+      </header>
+      <div class="ask-scope"><span class="muted small">Looking at</span><select id="askScope" aria-label="What Ask AI looks at"></select></div>
+      <div class="ask-body" id="askBody"></div>
+      <form class="ask-input" id="askForm">
+        <textarea id="askText" rows="1" placeholder="Ask about a client, a meeting, open tasks…" aria-label="Your question"></textarea>
+        <button class="btn btn-blue ask-send" aria-label="Send">${ICON.send}</button>
+      </form>
+    </aside>`);
+  $('#askFab').onclick = () => toggleAsk(true);
+  $('#askClose').onclick = () => toggleAsk(false);
+  $('#askNew').onclick = () => { ask.chatId = null; ask.messages = []; ask.refs = {}; renderAsk(); $('#askText').focus(); };
+  $('#askHistory').onclick = attempt(showAskHistory);
+  $('#askScope').onchange = (e) => { ask.scope = e.target.value === 'all' ? { type: 'all' } : JSON.parse(e.target.value); };
+  const ta = $('#askText');
+  ta.addEventListener('input', () => { ta.style.height = 'auto'; ta.style.height = Math.min(ta.scrollHeight, 160) + 'px'; });
+  ta.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); $('#askForm').requestSubmit(); } });
+  $('#askForm').addEventListener('submit', (e) => { e.preventDefault(); sendAsk(ta.value); });
+  document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && ask.open && !document.querySelector('dialog[open]')) toggleAsk(false); });
+}
+
+function toggleAsk(open) {
+  ask.open = open;
+  $('#askPanel').hidden = !open;
+  $('#askFab').hidden = open;
+  document.body.classList.toggle('ask-open', open);
+  if (open) { syncAskScope(); renderAsk(); setTimeout(() => $('#askText').focus(), 50); }
+}
+
+function syncAskScope() {
+  const r = routeScope();
+  const sel = $('#askScope');
+  if (!sel) return;
+  const opts = [];
+  if (r) opts.push(`<option value='${esc(JSON.stringify({ type: r.type, id: r.id }))}'>${r.type === 'meeting' ? 'This meeting' : 'Folder'}: ${esc(r.label)}</option>`);
+  opts.push(`<option value="all">All meetings</option>`);
+  sel.innerHTML = opts.join('');
+  ask.scope = r ? { type: r.type, id: r.id } : { type: 'all' };
+}
+
+const ASK_SUGGEST = {
+  meeting: ['Summarize this meeting in 3 bullets', 'What did we promise the client?', 'Draft a follow-up email'],
+  folder: ['Where do things stand with this client?', 'What is still open, and who owns it?', 'What are the biggest risks right now?'],
+  all: ['What did we promise clients this week?', 'Which tasks are overdue?', 'Which meetings talked about budget?'],
+};
+
+function renderAsk() {
+  const body = $('#askBody');
+  if (!body) return;
+  if (!ask.messages.length) {
+    const kind = ask.scope?.type || 'all';
+    body.innerHTML = `<div class="ask-empty">
+      <div class="ask-orb">${ICON.spark}</div>
+      <b>Ask anything about your meetings</b>
+      <p class="muted small">Answers come from your notes, tasks and transcripts, with links to the source.</p>
+      <div class="ask-suggest">${ASK_SUGGEST[kind].map((q) => `<button type="button" class="chip">${esc(q)}</button>`).join('')}</div>
+    </div>`;
+    $$('.ask-suggest .chip', body).forEach((b) => b.onclick = () => sendAsk(b.textContent));
+    return;
+  }
+  body.innerHTML = ask.messages.map((m) => `<div class="msg ${m.role}">${m.role === 'assistant' ? mdLite(m.content) : esc(m.content).replace(/\n/g, '<br>')}</div>`).join('')
+    + (ask.busy ? `<div class="msg assistant typing"><i></i><i></i><i></i></div>` : '');
+  body.scrollTop = body.scrollHeight;
+}
+
+// Small, safe markdown: escape first, then bold, code, lists, headings, paragraphs, and source links.
+function mdLite(text) {
+  let h = esc(text);
+  h = h.replace(/\[M:([\w-]+)@(\d+):(\d{2})\]/g, (_, id, mm, ss) => {
+    const t = (Number(mm) * 60 + Number(ss)) * 1000;
+    return `<a class="src" href="/m/${id}?t=${t}">${esc(ask.refs[id]?.title || 'Meeting')} · ${mm}:${ss}</a>`;
+  });
+  h = h.replace(/\[M:([\w-]+)\]/g, (_, id) => `<a class="src" href="/m/${id}">${esc(ask.refs[id]?.title || 'Meeting')}</a>`);
+  h = h.replace(/\*\*(.+?)\*\*/g, '<b>$1</b>').replace(/`([^`]+)`/g, '<code>$1</code>');
+  const out = [];
+  let list = null;
+  for (const line of h.split('\n')) {
+    const li = line.match(/^\s*(?:[-*•]|\d+[.)])\s+(.*)/);
+    if (li) { if (!list) { list = []; } list.push(`<li>${li[1]}</li>`); continue; }
+    if (list) { out.push(`<ul>${list.join('')}</ul>`); list = null; }
+    const hd = line.match(/^#{1,4}\s+(.*)/);
+    if (hd) out.push(`<h4>${hd[1]}</h4>`);
+    else if (line.trim()) out.push(`<p>${line}</p>`);
+  }
+  if (list) out.push(`<ul>${list.join('')}</ul>`);
+  return out.join('');
+}
+
+async function sendAsk(text) {
+  text = String(text || '').trim();
+  if (!text || ask.busy) return;
+  $('#askText').value = ''; $('#askText').style.height = 'auto';
+  ask.messages.push({ role: 'user', content: text });
+  ask.busy = true; renderAsk();
+  try {
+    const r = await api('/api/assistant', { body: { message: text, chatId: ask.chatId, scope: ask.scope } });
+    ask.chatId = r.chatId;
+    Object.assign(ask.refs, r.refs || {});
+    ask.messages.push({ role: 'assistant', content: r.answer });
+  } catch (e) {
+    ask.messages.push({ role: 'assistant', content: `**Couldn't answer:** ${e.message}` });
+  }
+  ask.busy = false; renderAsk();
+}
+
+async function showAskHistory() {
+  const chats = await api('/api/assistant/chats');
+  const body = $('#askBody');
+  body.innerHTML = `<div class="ask-history"><h4>Past chats</h4>${chats.length ? chats.map((c) => `
+    <div class="ask-chat" data-chat="${c.id}"><button type="button" class="ask-chat-open"><b>${esc(c.title || 'Chat')}</b><small>${when(c.updated_at)}${c.scope_type !== 'all' ? ` · ${c.scope_type}` : ''}</small></button>
+    <button type="button" class="icon-btn" data-del="${c.id}" aria-label="Delete chat">✕</button></div>`).join('') : '<p class="muted small">No chats yet.</p>'}</div>`;
+  $$('.ask-chat-open', body).forEach((b) => b.onclick = attempt(async () => {
+    const c = await api(`/api/assistant/chats/${b.closest('[data-chat]').dataset.chat}`);
+    ask.chatId = c.id; ask.messages = c.messages; ask.refs = c.refs || {};
+    renderAsk();
+  }));
+  $$('[data-del]', body).forEach((b) => b.onclick = attempt(async () => {
+    await api(`/api/assistant/chats/${b.dataset.del}`, { method: 'DELETE' });
+    if (ask.chatId === b.dataset.del) { ask.chatId = null; ask.messages = []; }
+    showAskHistory();
+  }));
+}
+
+// Sidebar "Ask AI" button (rendered with the shell) opens the drawer.
+document.addEventListener('click', (e) => { if (e.target.closest('[data-ask]')) { mountAsk(); toggleAsk(true); } });
 
 route();

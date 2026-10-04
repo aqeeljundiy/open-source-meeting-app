@@ -137,6 +137,41 @@ async function openaiCompatibleObject({ ai, system, prompt, schema, name, maxTok
   return result.data;
 }
 
+// Free-text chat (the Ask AI assistant). messages: [{ role: 'user' | 'assistant', content }].
+export async function generateText({ ai, system, messages, maxTokens = 4000, effort = 'low' }) {
+  if (!ai.apiKey) throw new AIError(`No API key for ${PROVIDERS[ai.provider].label}. Add one in Settings → AI.`);
+  const p = PROVIDERS[ai.provider];
+  if (ai.provider === 'anthropic') {
+    const client = new Anthropic({
+      apiKey: ai.apiKey,
+      ...(process.env.ANTHROPIC_WORKSPACE_ID ? { defaultHeaders: { 'anthropic-workspace-id': process.env.ANTHROPIC_WORKSPACE_ID } } : {}),
+    });
+    const isHaiku = ai.model.startsWith('claude-haiku');
+    const fallback = /^claude-(opus-5|sonnet-5-5|fable-5-1)/.test(ai.model);
+    const res = await client.beta.messages.create({
+      model: ai.model, max_tokens: maxTokens, system, messages,
+      ...(isHaiku ? {} : { output_config: { effort } }),
+      ...(fallback ? { betas: ['server-side-fallback-2026-07-01'], fallbacks: 'default' } : {}),
+    });
+    if (res.stop_reason === 'refusal') throw new AIError('Claude declined this request');
+    return res.content.filter((b) => b.type === 'text').map((b) => b.text).join('').trim();
+  }
+  const res = await fetch(`${p.base}/chat/completions`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${ai.apiKey}` },
+    body: JSON.stringify({
+      model: ai.model,
+      messages: [{ role: 'system', content: system }, ...messages],
+      ...(ai.provider === 'openai' ? { max_completion_tokens: maxTokens } : { max_tokens: maxTokens }),
+    }),
+  });
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new AIError(`${p.label}: ${data.error?.message || `HTTP ${res.status}`}`);
+  const text = data.choices?.[0]?.message?.content;
+  if (!text) throw new AIError(`${p.label} returned no answer`);
+  return text.trim();
+}
+
 // Tiny call for the "Test connection" button.
 export async function testAI(ai) {
   const out = await generateObject({

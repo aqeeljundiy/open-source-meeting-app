@@ -156,6 +156,24 @@ db.exec(`
     api_key      TEXT NOT NULL,                       -- encrypted (secrets.mjs)
     PRIMARY KEY (workspace_id, provider)
   );
+  -- Ask AI conversations (private to each user).
+  CREATE TABLE IF NOT EXISTS assistant_chats (
+    id           TEXT PRIMARY KEY,
+    user_id      TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    title        TEXT,
+    scope_type   TEXT NOT NULL DEFAULT 'all',   -- all | folder | meeting
+    scope_id     TEXT,
+    created_at   TEXT NOT NULL DEFAULT (datetime('now')),
+    updated_at   TEXT NOT NULL DEFAULT (datetime('now'))
+  );
+  CREATE TABLE IF NOT EXISTS assistant_messages (
+    id      INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id TEXT NOT NULL REFERENCES assistant_chats(id) ON DELETE CASCADE,
+    role    TEXT NOT NULL,                       -- user | assistant
+    content TEXT NOT NULL,
+    at      TEXT NOT NULL DEFAULT (datetime('now'))
+  );
   CREATE INDEX IF NOT EXISTS cal_start ON calendar_events(start_at);
   CREATE INDEX IF NOT EXISTS utt_meeting ON utterances(meeting_id, t_ms);
   CREATE INDEX IF NOT EXISTS meetings_ws ON meetings(workspace_id, created_at);

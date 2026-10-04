@@ -13,6 +13,8 @@ const { finishMeeting, refreshFolderOverview } = await import('./pipeline.mjs');
 const { transcriptText, MEETING_TYPES } = await import('./summarize.mjs');
 const { PROVIDERS, aiFor, testAI, savedKey } = await import('./llm.mjs');
 const { seal, unseal, maskKey } = await import('./secrets.mjs');
+const assistant = await import('./assistant.mjs');
+const demos = await import('./demo.mjs');
 const auth = await import('./auth.mjs');
 const cal = await import('./calendar.mjs');
 const { loadBrand, brandHead } = await import('./brand.mjs');
@@ -490,6 +492,31 @@ on('POST', '/api/ai/test', async (ctx, p, body) => {
     throw new HttpError(400, err.message.slice(0, 300));
   }
 }, { role: 'owner' });
+
+// Demo clients (files in demos/; the open-source repo ships none)
+on('GET', '/api/demos', (ctx) => ({ demos: demos.listDemos(), status: demos.demoStatus(ctx.workspace.id) }), { role: 'owner' });
+on('POST', '/api/demos/:name/load', (ctx, p) => {
+  if (!aiFor(ctx.workspace.id).apiKey) throw new HttpError(400, 'Add an AI key in Settings → AI first: the demo meetings are written by the AI');
+  try { return demos.loadDemo(p.name, { workspaceId: ctx.workspace.id, userId: ctx.user.id, botName: wsBotName(ctx.workspace.id) }); }
+  catch (err) { throw new HttpError(400, err.message); }
+}, { role: 'owner' });
+
+// Ask AI assistant (chats are private to each user)
+on('POST', '/api/assistant', async (ctx, p, body) => {
+  const message = str(body.message, 4000);
+  if (!message) throw new HttpError(400, 'Ask something');
+  const scope = ['meeting', 'folder'].includes(body.scope?.type) && typeof body.scope.id === 'string' ? { type: body.scope.type, id: body.scope.id } : { type: 'all' };
+  if (!aiFor(ctx.workspace.id).apiKey) throw new HttpError(400, 'Add an AI key in Settings → AI to use Ask AI');
+  try {
+    return await assistant.ask({ workspaceId: ctx.workspace.id, userId: ctx.user.id, brandName: BRAND.name, chatId: body.chatId, scope, message });
+  } catch (err) {
+    if (err.status) throw new HttpError(err.status, err.message);
+    throw new HttpError(502, err.message.slice(0, 300));
+  }
+});
+on('GET', '/api/assistant/chats', (ctx) => assistant.listChats(ctx.user.id, ctx.workspace.id));
+on('GET', '/api/assistant/chats/:id', (ctx, p) => assistant.getChat(ctx.user.id, p.id) || (() => { throw new HttpError(404, 'Chat not found'); })());
+on('DELETE', '/api/assistant/chats/:id', (ctx, p) => { assistant.deleteChat(ctx.user.id, p.id); return { ok: true }; });
 
 // Tasks
 on('POST', '/api/tasks/bulk', (ctx, p, body) => {
