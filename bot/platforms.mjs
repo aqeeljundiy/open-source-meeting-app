@@ -53,8 +53,9 @@ const MEET_DIALOGS = [
   /^Dismiss$/i,
   /^Reject all$/i,
   /^Not now$/i,
+  /^OK$/i,
 ];
-async function dismissMeetDialogs(page, log) {
+export async function dismissMeetDialogs(page, log) {
   for (let i = 0; i < 5; i++) {
     let clicked = false;
     for (const name of MEET_DIALOGS) {
@@ -142,9 +143,16 @@ export const meet = {
 
   async state(page) {
     const t = await bodyText(page);
-    // The waiting room also has a "Leave call" button, so check its text first.
-    if (/Asking to be let in|Please wait until a meeting host|someone in the meeting lets you in|You.ll join the call when/i.test(t)) return 'waiting';
-    if (await page.getByRole('button', { name: /Leave call/i }).first().isVisible().catch(() => false)) return 'in_call';
+    // In the call = in-call controls exist. Query the DOM directly: while Meet shows a dialog
+    // ("Others may see your video differently… Got it") it hides everything else from the
+    // accessibility tree, so role-based lookups miss the toolbar. The waiting room has
+    // "Leave call" too, but never chat / reactions / captions.
+    const inCall = await page.evaluate(() => {
+      const has = (sel) => Boolean(document.querySelector(sel));
+      return has('[aria-label^="Leave call" i]')
+        && (has('[aria-label*="Chat with everyone" i]') || has('[aria-label^="Send a reaction" i]') || has('[aria-label*="captions" i]'));
+    }).catch(() => false);
+    if (inCall) return 'in_call';
     if (/denied your request|can't join this call|You can.t join this video call|meeting code has expired|Check your meeting code/i.test(t)) return 'denied';
     if (/You left the meeting|been removed from the meeting|call has ended|The meeting has ended|Return to home screen/i.test(t)) return 'ended';
     if (/Asking to be let in|Please wait until a meeting host|someone in the meeting lets you in|You.ll join the call when/i.test(t)) return 'waiting';
@@ -153,12 +161,17 @@ export const meet = {
 
   // Mute again if the mic is on (some layouts unmute on join). Called every few seconds.
   async ensureMuted(page, log) {
-    const b = page.getByRole('button', { name: /^Turn off microphone/i }).first();
-    if (await b.isVisible().catch(() => false)) {
-      await b.click({ timeout: 2000 }).catch(() => page.keyboard.press(process.platform === 'darwin' ? 'Meta+D' : 'Control+D'));
-      log?.('Muted the microphone');
-    }
+    // DOM lookup (not role-based), so a covering dialog can't hide the mic button from us.
+    const muted = await page.evaluate(() => {
+      const b = document.querySelector('button[aria-label^="Turn off microphone" i], [role=button][aria-label^="Turn off microphone" i]');
+      if (!b) return false;
+      b.click();
+      return true;
+    }).catch(() => false);
+    if (muted) log?.('Muted the microphone');
   },
+
+  dismissDialogs: (page, log) => dismissMeetDialogs(page, log),
 
   async afterJoin(page, log) {
     await this.ensureMuted(page, log);

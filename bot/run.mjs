@@ -108,6 +108,7 @@ async function main() {
     if (state === 'ended') throw new Error('The meeting ended before the bot was admitted');
     if (state === 'waiting' && q.getMeeting.get(id).status !== 'waiting_room') setStatus('waiting_room');
     if (Date.now() > admitDeadline) throw new Error('Nobody let the bot in');
+    await platform.dismissDialogs?.(page, log);   // pop-ups that appear right after being admitted
     await sleep(2000);
   }
 
@@ -155,6 +156,7 @@ async function main() {
 
     if (tick % 5) continue;
     await platform.ensureMuted?.(page, log);
+    await platform.dismissDialogs?.(page);
     if (stopRequested()) { assembler.flush(); return finish(page, 'stopped'); }
     const s = await platform.state(page);
     if (s === 'ended' || s === 'denied') {
