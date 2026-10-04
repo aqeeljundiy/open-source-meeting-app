@@ -174,6 +174,14 @@ db.exec(`
     content TEXT NOT NULL,
     at      TEXT NOT NULL DEFAULT (datetime('now'))
   );
+  -- One-time email sign-in links (token = sha256 of the link's secret).
+  CREATE TABLE IF NOT EXISTS magic_links (
+    token      TEXT PRIMARY KEY,
+    email      TEXT NOT NULL COLLATE NOCASE,
+    created_at TEXT NOT NULL DEFAULT (datetime('now')),
+    expires_at TEXT NOT NULL,
+    used_at    TEXT
+  );
   CREATE INDEX IF NOT EXISTS cal_start ON calendar_events(start_at);
   CREATE INDEX IF NOT EXISTS utt_meeting ON utterances(meeting_id, t_ms);
   CREATE INDEX IF NOT EXISTS meetings_ws ON meetings(workspace_id, created_at);

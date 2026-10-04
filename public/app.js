@@ -240,6 +240,12 @@ async function viewAuth(mode) {
       <p class="muted">${mode === 'signup' ? `Your ${esc(BRAND.name)} notetaker for Google Meet and Zoom.` : 'Sign in to your meetings, notes and tasks.'}</p>
       ${cfg.googleLogin ? `<a class="btn btn-block btn-google" href="/api/auth/google/start">${ICON.google} Continue with Google</a>
       <div class="or"><span>or with email</span></div>` : ''}
+      ${cfg.magic && mode === 'login' ? `<form id="magicForm" class="magic">
+        <label>Work email<input name="email" type="email" required autocomplete="email" ${cfg.domains?.length ? `placeholder="you@${esc(cfg.domains[0])}"` : ''}></label>
+        <button class="btn btn-blue btn-block">Email me a sign-in link</button>
+        <p class="muted small center" id="magicMsg"></p>
+      </form>
+      <div class="or"><span>or with a password</span></div>` : ''}
       <form id="authForm">
         ${mode === 'signup' ? '<label>Name<input name="name" required autocomplete="name"></label>' : ''}
         <label>Email<input name="email" type="email" required autocomplete="email" ${cfg.domains?.length ? `placeholder="you@${esc(cfg.domains[0])}"` : ''}></label>
@@ -251,6 +257,15 @@ async function viewAuth(mode) {
       <p class="muted center">${mode === 'signup' ? 'Have an account? <a href="/login">Sign in</a>' : 'New here? <a href="/signup">Create an account</a>'}</p>
     </div>
   </div>`;
+  $('#magicForm')?.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const btn = $('button', e.target);
+    btn.disabled = true;
+    try {
+      await api('/api/auth/magic', { body: { email: new FormData(e.target).get('email') } });
+      e.target.innerHTML = `<div class="magic-sent"><b>Check your inbox</b><p class="muted small">If that address can use this app, a sign-in link is on its way. It works once and expires in 15 minutes.</p></div>`;
+    } catch (err) { $('#magicMsg').textContent = err.message; $('#magicMsg').classList.add('bad'); btn.disabled = false; }
+  });
   $('#authForm').addEventListener('submit', async (e) => {
     e.preventDefault();
     const btn = $('button', e.target);

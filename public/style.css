@@ -505,3 +505,7 @@ video { width: 100%; border-radius: 14px; background: #000; aspect-ratio: 16/9; 
 @media (min-width: 1200px) { body.ask-open .main { margin-right: 450px; transition: margin .35s var(--ease); } }
 @media (max-width: 600px) { .ask-panel { inset: 0; width: 100%; border-radius: 0; } .ask-fab span { display: none; } .ask-fab { padding: 0 14px; } }
 @media (prefers-reduced-motion: reduce) { .ask-fab, .ask-panel, .msg { animation: none; } .typing i { animation: none; } }
+.magic label { margin-bottom: 10px; }
+.magic p { margin: 10px 0 0; min-height: 1em; }
+.magic-sent { text-align: center; padding: 14px 6px; border-radius: var(--r-md); background: var(--soft-2); }
+.magic-sent p { margin: 6px 0 0; }

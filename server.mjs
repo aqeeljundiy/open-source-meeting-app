@@ -15,6 +15,7 @@ const { PROVIDERS, aiFor, testAI, savedKey } = await import('./llm.mjs');
 const { seal, unseal, maskKey } = await import('./secrets.mjs');
 const assistant = await import('./assistant.mjs');
 const demos = await import('./demo.mjs');
+const magic = await import('./magic.mjs');
 const auth = await import('./auth.mjs');
 const cal = await import('./calendar.mjs');
 const { loadBrand, brandHead } = await import('./brand.mjs');
@@ -133,7 +134,7 @@ on('POST', '/api/auth/login', (ctx, p, body, req, res) => {
 // GOOGLE_LOGIN=0 hides the "Continue with Google" button (calendar connect still works).
 on('GET', '/api/brand', () => ({ name: BRAND.name, tagline: BRAND.tagline, logo: BRAND.logo, theme: BRAND.theme, botName: BRAND.botName }), { public: true });
 
-on('GET', '/api/auth/config', () => ({ domains: auth.allowedDomains(), google: cal.googleEnabled(), googleLogin: cal.googleEnabled() && process.env.GOOGLE_LOGIN !== '0' }), { public: true });
+on('GET', '/api/auth/config', () => ({ magic: magic.magicEnabled(), domains: auth.allowedDomains(), google: cal.googleEnabled(), googleLogin: cal.googleEnabled() && process.env.GOOGLE_LOGIN !== '0' }), { public: true });
 
 // Google: /start sets a one-time state cookie and redirects to Google; /callback finishes sign-in or linking.
 on('GET', '/api/auth/google/start', (ctx, p, body, req, res) => {
@@ -164,6 +165,31 @@ on('GET', '/api/auth/google/callback', async (ctx, p, body, req, res) => {
     console.error(err);
     fail(err.message);
   }
+}, { public: true });
+
+// Magic links: email a one-time sign-in link.
+on('POST', '/api/auth/magic', async (ctx, p, body, req) => {
+  throttle(req);
+  const base = (process.env.PUBLIC_URL || `http://${req.headers.host}`).replace(/\/$/, '');
+  try {
+    await magic.sendMagicLink(body.email, { baseUrl: base, brandName: BRAND.name, brandColor: BRAND.color });
+  } catch (err) {
+    if (err instanceof HttpError) throw err;
+    console.error('magic link email failed:', err.message);
+    throw new HttpError(502, 'Could not send the email. Try again, or sign in another way.');
+  }
+  return { ok: true };
+}, { public: true });
+
+on('GET', '/api/auth/magic/verify', (ctx, p, body, req, res) => {
+  const token = new URL(req.url, 'http://x').searchParams.get('token');
+  try {
+    auth.startSession(res, magic.useMagicLink(token));
+    res.writeHead(302, { Location: '/' });
+  } catch (err) {
+    res.writeHead(302, { Location: `/login?error=${encodeURIComponent(err.message)}` });
+  }
+  res.end();
 }, { public: true });
 
 on('POST', '/api/auth/logout', (ctx, p, body, req, res) => { auth.endSession(req, res); return { ok: true }; }, { public: true });
