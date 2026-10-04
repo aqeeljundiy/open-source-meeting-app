@@ -196,11 +196,21 @@ export const meet = {
     }
   },
 
+  // People in the call, including the bot. Several signals, because Meet's markup shifts:
+  // distinct participant tiles, the number on the people button, and the "only one here" notice.
   async participants(page) {
-    const label = await page.locator('[aria-label*="participant" i], [aria-label^="People" i]').first()
-      .getAttribute('aria-label').catch(() => null);
-    const n = label?.match(/(\d+)/);
-    return n ? Number(n[1]) : null;
+    return page.evaluate(() => {
+      const text = document.body?.innerText || '';
+      if (/You.re the only one here|No one else is here/i.test(text)) return 1;
+      const ids = new Set([...document.querySelectorAll('[data-participant-id]')].map((e) => e.getAttribute('data-participant-id')).filter(Boolean));
+      let counter = 0;
+      for (const el of document.querySelectorAll('[aria-label*="everyone" i], [aria-label*="participant" i], [aria-label^="People" i]')) {
+        const n = Number(((el.getAttribute('aria-label') || '') + ' ' + (el.textContent || '')).match(/\b(\d{1,3})\b/)?.[1]);
+        if (n > counter) counter = n;
+      }
+      const best = Math.max(ids.size, counter);
+      return best || null;
+    }).catch(() => null);
   },
 
   async leave(page) {

@@ -212,6 +212,52 @@ export async function startAudioRecorder(page) {
   });
 }
 
+// ---------- tab audio ----------
+// The meeting's audio exactly as it plays in this tab (getDisplayMedia, auto-accepted by
+// --auto-accept-this-tab-capture). Needs a user gesture + window focus: true on servers
+// (kiosk window), often false on desktops; the recorder then falls back to WebRTC mixing.
+export async function grabTabAudio(page) {
+  await page.evaluate(() => {
+    const btn = document.createElement('button');
+    btn.id = '__mb_aud';
+    btn.textContent = 'a';
+    btn.style.cssText = 'position:fixed;left:0;top:0;width:4px;height:4px;opacity:0.01;z-index:2147483647';
+    btn.onclick = async () => {
+      try {
+        const s = await navigator.mediaDevices.getDisplayMedia({ video: true, audio: { suppressLocalAudioPlayback: false }, preferCurrentTab: true, selfBrowserSurface: 'include' });
+        s.getVideoTracks().forEach((t) => t.stop());   // video comes from our own canvas
+        window.__mbTabAudio = s.getAudioTracks()[0] || null;
+      } catch { window.__mbTabAudio = null; }
+      window.__mbTabAudioDone = true;
+      btn.remove();
+    };
+    document.body.appendChild(btn);
+  });
+  await page.bringToFront().catch(() => {});
+  const box = await page.locator('#__mb_aud').boundingBox().catch(() => null);
+  if (box) await page.mouse.click(box.x + 2, box.y + 2);
+  await page.waitForFunction(() => window.__mbTabAudioDone, null, { timeout: 8000 }).catch(() => {});
+  return page.evaluate(() => Boolean(window.__mbTabAudio));
+}
+
+// How loud the recorded audio is (RMS 0..1) over `ms`; ~0 means silent.
+export async function audioLevel(page, ms = 4000) {
+  return page.evaluate(async (ms) => {
+    const an = window.__mbAnalyser;
+    if (!an) return null;
+    const buf = new Float32Array(an.fftSize);
+    let peak = 0;
+    const end = Date.now() + ms;
+    while (Date.now() < end) {
+      an.getFloatTimeDomainData(buf);
+      let sum = 0; for (const v of buf) sum += v * v;
+      peak = Math.max(peak, Math.sqrt(sum / buf.length));
+      await new Promise((r) => setTimeout(r, 100));
+    }
+    return peak;
+  }, ms);
+}
+
 // ---------- composite recorder (default) ----------
 // Builds the video ourselves from the call's own <video> feeds: the biggest one on screen
 // (active speaker or screen share, as Meet/Zoom size it) fills the frame, others go in a strip.
@@ -230,8 +276,16 @@ export async function startCompositeRecorder(page, { video = true } = {}) {
         ctx.createMediaStreamSource(s).connect(dest);
       } catch {}
     };
-    (window.__mbTracks || []).forEach(add);
-    window.__mbOnTrack = add;
+    if (window.__mbTabAudio) {
+      // Best source: the tab's real audio output.
+      ctx.createMediaStreamSource(new MediaStream([window.__mbTabAudio])).connect(dest);
+    } else {
+      (window.__mbTracks || []).forEach(add);
+      window.__mbOnTrack = add;
+    }
+    window.__mbAnalyser = ctx.createAnalyser();
+    window.__mbAnalyser.fftSize = 2048;
+    ctx.createMediaStreamSource(dest.stream).connect(window.__mbAnalyser);
 
     let stream = dest.stream;
     if (withVideo) {
@@ -310,6 +364,6 @@ export async function startCompositeRecorder(page, { video = true } = {}) {
     rec.onstop = () => { clearInterval(window.__mbDraw); queue.then(() => window.__mbRecStopped()); };
     rec.start(5000);
     window.__mbRecorder = rec;
-    return { mime, audioTracks: (window.__mbTracks || []).length };
+    return { mime, audioTracks: (window.__mbTracks || []).length, tabAudio: Boolean(window.__mbTabAudio), ctxState: ctx.state };
   }, video);
 }

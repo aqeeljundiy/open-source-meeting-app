@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { q, REC_DIR } from '../db.mjs';
 import { platforms } from './platforms.mjs';
-import { startRecorder, stopRecorder, startCompositeRecorder, hookAudioTracks, captionSnapshot, CaptionAssembler } from './page.mjs';
+import { startRecorder, stopRecorder, startCompositeRecorder, grabTabAudio, audioLevel, hookAudioTracks, captionSnapshot, CaptionAssembler } from './page.mjs';
 import { finishMeeting } from '../pipeline.mjs';
 
 const id = process.argv[2];
@@ -18,7 +18,7 @@ const platform = platforms[meeting.platform];
 
 const ADMIT_TIMEOUT_MS = Number(process.env.ADMIT_TIMEOUT_MIN || 10) * 60_000;
 const MAX_MEETING_MS = Number(process.env.MAX_MEETING_MIN || 180) * 60_000;
-const ALONE_TIMEOUT_MS = Number(process.env.ALONE_TIMEOUT_MIN || 3) * 60_000;
+const ALONE_TIMEOUT_MS = Number(process.env.ALONE_TIMEOUT_MIN || 1) * 60_000;   // leave this long after everyone else has gone
 // Headless records very few video frames; run headed (a real window, or Xvfb in Docker).
 const HEADLESS = process.env.BOT_HEADLESS === '1';
 
@@ -123,8 +123,14 @@ async function main() {
   if (wantVideo && process.env.RECORD_MODE === 'tab' && await startRecorder(page)) {
     log('Recording the whole tab');
   } else {
+    await grabTabAudio(page);
     const r = await startCompositeRecorder(page, { video: wantVideo });
-    log(`Recording ${wantVideo ? 'video (participants and screen shares only, no meeting UI)' : 'audio only'}, ${r.audioTracks} audio track${r.audioTracks === 1 ? '' : 's'} so far`);
+    log(`Recording ${wantVideo ? 'video (participants and screen shares only, no meeting UI)' : 'audio only'}; audio from ${r.tabAudio ? 'the tab' : `${r.audioTracks} call stream${r.audioTracks === 1 ? '' : 's'}`} (${r.ctxState})`);
+    // Check a little later that sound is actually coming through (people may be quiet at first).
+    setTimeout(async () => {
+      const lvl = await audioLevel(page, 8000).catch(() => null);
+      if (lvl != null) log(lvl > 0.002 ? `Audio OK (level ${lvl.toFixed(3)})` : 'Audio looks silent so far (nobody talking yet, or no sound reaching the bot)');
+    }, 20000);
   }
   recStart = Date.now();
   q.setRecording.run(recFile, id);
