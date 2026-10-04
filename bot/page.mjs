@@ -265,7 +265,8 @@ export async function audioLevel(page, ms = 4000) {
 // desktops too. Audio = every remote WebRTC track mixed (see hookAudioTracks).
 export async function startCompositeRecorder(page, { video = true } = {}) {
   return page.evaluate(async (withVideo) => {
-    const ctx = new AudioContext();
+    // 'playback' = larger audio buffers: survives CPU spikes without crackles or gaps.
+    const ctx = new AudioContext({ latencyHint: 'playback', sampleRate: 48000 });
     await ctx.resume().catch(() => {});
     const dest = ctx.createMediaStreamDestination();
     const add = (track) => {
@@ -342,15 +343,16 @@ export async function startCompositeRecorder(page, { video = true } = {}) {
         }
       };
       // Timers (not requestAnimationFrame): keep drawing even if the window is covered.
-      window.__mbDraw = setInterval(draw, 1000 / 15);
+      window.__mbDraw = setInterval(draw, 1000 / 20);
       draw();
-      stream = new MediaStream([...c.captureStream(15).getVideoTracks(), ...dest.stream.getAudioTracks()]);
+      stream = new MediaStream([...c.captureStream(20).getVideoTracks(), ...dest.stream.getAudioTracks()]);
     }
 
     const mime = withVideo
-      ? ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'].find((m) => MediaRecorder.isTypeSupported(m))
+      // VP8 first: VP9 costs 2-4x more CPU to encode live, which made recordings stutter on a busy server.
+      ? ['video/webm;codecs=vp8,opus', 'video/webm;codecs=vp9,opus', 'video/webm'].find((m) => MediaRecorder.isTypeSupported(m))
       : 'audio/webm;codecs=opus';
-    const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 1_500_000, audioBitsPerSecond: 64_000 });
+    const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 2_500_000, audioBitsPerSecond: 96_000 });
     let queue = Promise.resolve();
     rec.ondataavailable = (e) => {
       if (!e.data.size) return;

@@ -173,9 +173,30 @@ export const meet = {
 
   dismissDialogs: (page, log) => dismissMeetDialogs(page, log),
 
+  // Spotlight layout: Meet then sends only the main speaker / screen share in high quality
+  // instead of every tile, so there is far less video to decode (less CPU, sharper result).
+  async spotlight(page, log) {
+    try {
+      if (!(await clickButton(page, [/^More options$/i], { timeout: 4000 }))) return;
+      const item = page.getByRole('menuitem', { name: /Change layout/i }).first();
+      await item.waitFor({ timeout: 3000 });
+      await item.click();
+      const spot = page.getByRole('radio', { name: /Spotlight/i }).first();
+      await spot.waitFor({ timeout: 3000 });
+      await spot.check({ force: true }).catch(() => spot.click());
+      log?.('Layout set to Spotlight');
+      await page.keyboard.press('Escape');
+      await clickButton(page, [/^Close$/i]);
+    } catch {
+      await page.keyboard.press('Escape').catch(() => {});
+      log?.('Could not switch to Spotlight layout (kept the default)');
+    }
+  },
+
   async afterJoin(page, log) {
     await this.ensureMuted(page, log);
     await dismissMeetDialogs(page, log);
+    await this.spotlight(page, log);
     // Captions on: the toolbar button, else the "c" keyboard shortcut.
     const on = await clickButton(page, [/Turn on captions/i], { timeout: 8000 });
     if (!on) await page.keyboard.press('c');

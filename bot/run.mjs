@@ -45,12 +45,18 @@ async function launchBrowser() {
     '--autoplay-policy=no-user-gesture-required',
     // Keep timers, video and audio running even when the bot's window is covered or in the background.
     '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows',
-    '--no-first-run', '--no-default-browser-check', '--disable-features=Translate',
+    '--no-first-run', '--no-default-browser-check',
     '--lang=en-US', '--accept-lang=en-US,en',
     // No tab strip or address bar: the recording is exactly the meeting, nothing cut off.
     // Servers: kiosk fills the whole 1280x720 virtual screen. Desktop: an app window that size.
     process.platform === 'linux' ? '--kiosk' : '--window-size=1280,807',
     '--window-position=0,0',
+    // Lighter on a shared server: no emulated GPU (software compositing is cheaper than SwiftShader
+    // under Xvfb), and no background features the bot never uses.
+    ...(process.platform === 'linux' ? ['--disable-gpu', '--disable-software-rasterizer'] : []),
+    '--disable-extensions', '--disable-sync', '--disable-component-update', '--disable-default-apps',
+    '--disable-features=Translate,MediaRouter,OptimizationHints,CalculateNativeWinOcclusion,InterestFeedContentSuggestions',
+    '--metrics-recording-only', '--no-pings',
   ];
   if (HEADLESS) flags.push('--headless=new');
   // In Docker: Chrome runs as root and /dev/shm is tiny.
