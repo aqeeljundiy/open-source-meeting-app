@@ -1,0 +1,11 @@
+{
+  "name": "Acme",
+  "tagline": "Meetings",
+  "logo": null,
+  "color": "#7c3aed",
+  "color2": "#8b5cf6",
+  "accent": "#7c3aed",
+  "theme": "auto",
+  "botName": "Acme Notetaker",
+  "singleWorkspace": false
+}

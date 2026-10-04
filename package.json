@@ -1,0 +1,20 @@
+{
+  "name": "open-source-meeting-app",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.mjs",
+    "bot": "node bot/run.mjs"
+  },
+  "engines": {
+    "node": ">=22.5"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.131.0",
+    "playwright": "^1.63.0",
+    "zod": "^4.6.5"
+  },
+  "description": "Self-hosted meeting notetaker: a bot joins Google Meet and Zoom, records, transcribes and writes notes and tasks with Claude.",
+  "license": "AGPL-3.0-only",
+  "packageManager": "pnpm@12.8.1"
+}
