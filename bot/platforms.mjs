@@ -127,6 +127,11 @@ export const meet = {
       log('Name did not stick (a pop-up got in the way), retrying');
     }
     await dismissMeetDialogs(page, log);
+    // Mic and camera off before joining (on servers the bot has a virtual mic, which would otherwise be live).
+    for (const name of [/^Turn off microphone/i, /^Turn off camera/i]) {
+      const b = page.getByRole('button', { name }).first();
+      if (await b.isVisible().catch(() => false)) { await humanClick(page, b); await jitter(300, 700); log(`${String(name).includes('micro') ? 'Microphone' : 'Camera'} off`); }
+    }
     await jitter(1000, 2200);
     // Wording varies with the devices: "Ask to join without camera", "Join now without microphone"...
     const join = page.getByRole('button', { name: /^(Ask to join|Join now|Join anyway|Switch here)( without .+)?$/i }).first();
@@ -146,7 +151,18 @@ export const meet = {
     return 'unknown';
   },
 
+  // Mute again if the mic is on (some layouts unmute on join). Called every few seconds.
+  async ensureMuted(page, log) {
+    const b = page.getByRole('button', { name: /^Turn off microphone/i }).first();
+    if (await b.isVisible().catch(() => false)) {
+      await b.click({ timeout: 2000 }).catch(() => page.keyboard.press(process.platform === 'darwin' ? 'Meta+D' : 'Control+D'));
+      log?.('Muted the microphone');
+    }
+  },
+
   async afterJoin(page, log) {
+    await this.ensureMuted(page, log);
+    await dismissMeetDialogs(page, log);
     // Captions on: the toolbar button, else the "c" keyboard shortcut.
     const on = await clickButton(page, [/Turn on captions/i], { timeout: 8000 });
     if (!on) await page.keyboard.press('c');

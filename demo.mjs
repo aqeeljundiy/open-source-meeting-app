@@ -44,6 +44,10 @@ async function run(demo, s, { workspaceId, userId, botName }) {
   for (const [i, m] of demo.meetings.entries()) {
     s.current = i + 1;
     s.step = `Writing notes for meeting ${i + 1} of ${demo.meetings.length}: ${m.title}`;
+    // Loading again continues where it stopped: finished meetings are kept, failed ones redone.
+    const existing = db.prepare(`SELECT id, status FROM meetings WHERE folder_id = ? AND title = ?`).get(folder.id, m.title);
+    if (existing?.status === 'done') { created.push({ id: existing.id, video: m.video, title: m.title }); continue; }
+    if (existing) q.deleteMeeting.run(existing.id);
     const id = newId();
     q.insertMeeting.run(id, workspaceId, userId, m.title, demo.url || 'https://meet.google.com/demo-meet-ing', 'meet', botName);
     const start = `datetime('now', '-${Number(m.days_ago) || 0} days')`;
@@ -54,7 +58,12 @@ async function run(demo, s, { workspaceId, userId, botName }) {
     const spread = ((Number(m.minutes) || 30) * 60000) / Math.max(1, m.lines.length);
     for (const [speaker, text] of m.lines) { q.addUtterance.run(id, speaker, text, Math.round(t)); t += spread * (0.7 + Math.random() * 0.6); }
     q.addEvent.run(id, `Demo meeting loaded from "${demo.title}" (fictional transcript)`);
-    await finishMeeting(id, (msg) => q.addEvent.run(id, msg), (st, e = null) => q.setStatus.run(st, e, id));
+    // AI calls occasionally fail on a network blip: try up to 3 times.
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      await finishMeeting(id, (msg) => q.addEvent.run(id, msg), (st, e = null) => q.setStatus.run(st, e, id));
+      if (q.getMeeting.get(id).status !== 'failed') break;
+      if (attempt < 3) { s.step = `Retrying meeting ${i + 1} (${attempt + 1}/3)`; await new Promise((r) => setTimeout(r, 4000 * attempt)); }
+    }
     const after = q.getMeeting.get(id);
     if (after.status === 'failed') throw new Error(`Meeting ${i + 1} failed: ${after.error}`);
     // Mark the share of tasks the story says are finished.

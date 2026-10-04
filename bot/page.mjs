@@ -211,3 +211,105 @@ export async function startAudioRecorder(page) {
     return (window.__mbTracks || []).length;
   });
 }
+
+// ---------- composite recorder (default) ----------
+// Builds the video ourselves from the call's own <video> feeds: the biggest one on screen
+// (active speaker or screen share, as Meet/Zoom size it) fills the frame, others go in a strip.
+// Meet's toolbar, pop-ups and captions never appear. Needs no window focus, so it works on
+// desktops too. Audio = every remote WebRTC track mixed (see hookAudioTracks).
+export async function startCompositeRecorder(page, { video = true } = {}) {
+  return page.evaluate(async (withVideo) => {
+    const ctx = new AudioContext();
+    await ctx.resume().catch(() => {});
+    const dest = ctx.createMediaStreamDestination();
+    const add = (track) => {
+      try {
+        const s = new MediaStream([track]);
+        const el = new Audio(); el.muted = true; el.srcObject = s; el.play().catch(() => {});   // Chrome needs a sink to feed Web Audio
+        (window.__mbSinks ||= []).push(el);
+        ctx.createMediaStreamSource(s).connect(dest);
+      } catch {}
+    };
+    (window.__mbTracks || []).forEach(add);
+    window.__mbOnTrack = add;
+
+    let stream = dest.stream;
+    if (withVideo) {
+      const W = 1280, H = 720, PAD = 14;
+      const c = document.createElement('canvas'); c.width = W; c.height = H;
+      const x = c.getContext('2d');
+      const nameFor = (v) => {
+        const tile = v.closest('[data-participant-id],[data-requested-participant-id],[data-self-name]');
+        const lines = (tile?.innerText || '').split('\n').map((s) => s.trim())
+          .filter((s) => s && s.length < 40 && !/^(more_vert|mic|mic_off|keep|push_pin|visual_effects|frame_person|close|[a-z_]+)$/.test(s));
+        return lines[0] || '';
+      };
+      const drawVideo = (v, a, mode) => {
+        const vr = v.videoWidth / v.videoHeight, ar = a.w / a.h;
+        let sw = v.videoWidth, sh = v.videoHeight, sx = 0, sy = 0, dx = a.x, dy = a.y, dw = a.w, dh = a.h;
+        if (mode === 'cover') { if (vr > ar) { sw = sh * ar; sx = (v.videoWidth - sw) / 2; } else { sh = sw / ar; sy = (v.videoHeight - sh) / 2; } }
+        else if (vr > ar) { dh = a.w / vr; dy = a.y + (a.h - dh) / 2; } else { dw = a.h * vr; dx = a.x + (a.w - dw) / 2; }
+        x.save(); x.beginPath(); x.roundRect(a.x, a.y, a.w, a.h, 12); x.clip();
+        x.fillStyle = '#161616'; x.fillRect(a.x, a.y, a.w, a.h);
+        x.drawImage(v, sx, sy, sw, sh, dx, dy, dw, dh);
+        x.restore();
+      };
+      const label = (text, a) => {
+        if (!text) return;
+        x.font = '600 15px system-ui, sans-serif';
+        const w = x.measureText(text).width + 18;
+        x.fillStyle = 'rgba(0,0,0,.6)'; x.beginPath(); x.roundRect(a.x + 10, a.y + a.h - 34, w, 24, 12); x.fill();
+        x.fillStyle = '#fff'; x.fillText(text, a.x + 19, a.y + a.h - 17);
+      };
+      const draw = () => {
+        x.fillStyle = '#0d0d0d'; x.fillRect(0, 0, W, H);
+        const vids = [...document.querySelectorAll('video')]
+          .filter((v) => v.videoWidth > 0 && v.readyState >= 2)
+          .map((v) => ({ v, r: v.getBoundingClientRect() }))
+          .filter((o) => o.r.width > 40 && o.r.height > 30)
+          .sort((a, b) => b.r.width * b.r.height - a.r.width * a.r.height);
+        if (!vids.length) {
+          x.fillStyle = '#8f8f88'; x.font = '500 22px system-ui, sans-serif'; x.textAlign = 'center';
+          x.fillText('No cameras on (audio is still recorded)', W / 2, H / 2); x.textAlign = 'left';
+          return;
+        }
+        const [main, ...rest] = vids;
+        const strip = rest.slice(0, 5);
+        const mainA = strip.length ? { x: PAD, y: PAD, w: W - PAD * 2, h: H - PAD * 3 - 120 } : { x: PAD, y: PAD, w: W - PAD * 2, h: H - PAD * 2 };
+        drawVideo(main.v, mainA, 'contain');
+        label(nameFor(main.v), mainA);
+        if (strip.length) {
+          const tw = Math.min(214, (W - PAD * (strip.length + 1)) / strip.length), th = 120;
+          strip.forEach((o, i) => {
+            const a = { x: PAD + i * (tw + PAD), y: H - PAD - th, w: tw, h: th };
+            drawVideo(o.v, a, 'cover');
+            label(nameFor(o.v), a);
+          });
+        }
+      };
+      // Timers (not requestAnimationFrame): keep drawing even if the window is covered.
+      window.__mbDraw = setInterval(draw, 1000 / 15);
+      draw();
+      stream = new MediaStream([...c.captureStream(15).getVideoTracks(), ...dest.stream.getAudioTracks()]);
+    }
+
+    const mime = withVideo
+      ? ['video/webm;codecs=vp9,opus', 'video/webm;codecs=vp8,opus', 'video/webm'].find((m) => MediaRecorder.isTypeSupported(m))
+      : 'audio/webm;codecs=opus';
+    const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 1_500_000, audioBitsPerSecond: 64_000 });
+    let queue = Promise.resolve();
+    rec.ondataavailable = (e) => {
+      if (!e.data.size) return;
+      queue = queue.then(async () => {
+        const buf = new Uint8Array(await e.data.arrayBuffer());
+        let bin = '';
+        for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+        await window.__mbChunk(btoa(bin));
+      });
+    };
+    rec.onstop = () => { clearInterval(window.__mbDraw); queue.then(() => window.__mbRecStopped()); };
+    rec.start(5000);
+    window.__mbRecorder = rec;
+    return { mime, audioTracks: (window.__mbTracks || []).length };
+  }, video);
+}

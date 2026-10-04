@@ -8,7 +8,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { q, REC_DIR } from '../db.mjs';
 import { platforms } from './platforms.mjs';
-import { startRecorder, stopRecorder, startAudioRecorder, hookAudioTracks, captionSnapshot, CaptionAssembler } from './page.mjs';
+import { startRecorder, stopRecorder, startCompositeRecorder, hookAudioTracks, captionSnapshot, CaptionAssembler } from './page.mjs';
 import { finishMeeting } from '../pipeline.mjs';
 
 const id = process.argv[2];
@@ -43,6 +43,8 @@ async function launchBrowser() {
   const flags = [
     '--auto-accept-this-tab-capture',      // auto-accept recording our own tab
     '--autoplay-policy=no-user-gesture-required',
+    // Keep timers, video and audio running even when the bot's window is covered or in the background.
+    '--disable-background-timer-throttling', '--disable-renderer-backgrounding', '--disable-backgrounding-occluded-windows',
     '--no-first-run', '--no-default-browser-check', '--disable-features=Translate',
     '--lang=en-US', '--accept-lang=en-US,en',
     // No tab strip or address bar: the recording is exactly the meeting, nothing cut off.
@@ -114,12 +116,14 @@ async function main() {
   await platform.afterJoin(page, log);
   await platform.announce(page, `Hi, I'm ${meeting.bot_name}. I'm recording this meeting and taking notes.`, log);
 
-  // Video (tab capture) when allowed and wanted; otherwise audio straight from the call.
+  // Default: our own clean video built from the call's video feeds + mixed meeting audio.
+  // RECORD_MODE=tab records the whole tab instead (shows Meet's UI); RECORD_VIDEO=0 = audio only.
   const wantVideo = process.env.RECORD_VIDEO !== '0';
-  const video = wantVideo && await startRecorder(page);
-  if (!video) {
-    const tracks = await startAudioRecorder(page);
-    log(`Recording audio only (${tracks} audio track${tracks === 1 ? '' : 's'} so far)${wantVideo ? ': screen recording needs the bot window in front' : ''}`);
+  if (wantVideo && process.env.RECORD_MODE === 'tab' && await startRecorder(page)) {
+    log('Recording the whole tab');
+  } else {
+    const r = await startCompositeRecorder(page, { video: wantVideo });
+    log(`Recording ${wantVideo ? 'video (participants and screen shares only, no meeting UI)' : 'audio only'}, ${r.audioTracks} audio track${r.audioTracks === 1 ? '' : 's'} so far`);
   }
   recStart = Date.now();
   q.setRecording.run(recFile, id);
@@ -150,6 +154,7 @@ async function main() {
     assembler.push(snapshot, Date.now());
 
     if (tick % 5) continue;
+    await platform.ensureMuted?.(page, log);
     if (stopRequested()) { assembler.flush(); return finish(page, 'stopped'); }
     const s = await platform.state(page);
     if (s === 'ended' || s === 'denied') {
