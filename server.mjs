@@ -11,7 +11,7 @@ try { process.loadEnvFile(join(import.meta.dirname, '.env')); } catch {}
 const { q, db, REC_DIR, detectPlatform } = await import('./db.mjs');
 const { finishMeeting, refreshFolderOverview } = await import('./pipeline.mjs');
 const { transcriptText, MEETING_TYPES } = await import('./summarize.mjs');
-const { PROVIDERS, aiFor, testAI } = await import('./llm.mjs');
+const { PROVIDERS, aiFor, testAI, savedKey } = await import('./llm.mjs');
 const { seal, unseal, maskKey } = await import('./secrets.mjs');
 const auth = await import('./auth.mjs');
 const cal = await import('./calendar.mjs');
@@ -441,12 +441,13 @@ on('DELETE', '/api/rules/:id', (ctx, p) => {
 const aiRow = db.prepare(`SELECT * FROM ai_settings WHERE workspace_id = ?`);
 on('GET', '/api/ai', (ctx) => {
   const ai = aiFor(ctx.workspace.id);
-  const row = aiRow.get(ctx.workspace.id);
-  const saved = unseal(row?.api_key);
   return {
-    providers: Object.fromEntries(Object.entries(PROVIDERS).map(([k, p]) => [k, { label: p.label, models: p.models, keyHint: p.keyHint, serverKey: Boolean(process.env[p.envKey]) }])),
+    providers: Object.fromEntries(Object.entries(PROVIDERS).map(([k, p]) => {
+      const saved = savedKey(ctx.workspace.id, k) || (k === ai.provider && ai.keySource === 'settings' ? ai.apiKey : null);
+      return [k, { label: p.label, models: p.models, keyHint: p.keyHint, serverKey: Boolean(process.env[p.envKey]), savedKey: saved ? maskKey(saved) : null }];
+    })),
     provider: ai.provider, model: ai.model, autoTasks: ai.autoTasks,
-    key: saved ? maskKey(saved) : null, keySource: ai.keySource,
+    key: PROVIDERS[ai.provider] && ai.keySource === 'settings' ? maskKey(ai.apiKey) : null, keySource: ai.keySource,
   };
 });
 
@@ -454,16 +455,21 @@ on('PATCH', '/api/ai', (ctx, p, body) => {
   const cur = aiRow.get(ctx.workspace.id) || { provider: 'anthropic', model: null, api_key: null, auto_tasks: 1 };
   const provider = body.provider ?? cur.provider;
   if (!PROVIDERS[provider]) throw new HttpError(400, 'Unknown AI provider');
-  // Switching provider drops the old provider's key and model.
   const switched = provider !== cur.provider;
   const model = 'model' in body ? str(body.model, 80) || null : switched ? null : cur.model;
-  let apiKey = switched ? null : cur.api_key;
-  if (body.clear_key) apiKey = null;
-  if (typeof body.api_key === 'string' && body.api_key.trim()) apiKey = seal(body.api_key.trim());
   const autoTasks = 'auto_tasks' in body ? (body.auto_tasks ? 1 : 0) : cur.auto_tasks;
-  db.prepare(`INSERT INTO ai_settings (workspace_id, provider, model, api_key, auto_tasks) VALUES (?, ?, ?, ?, ?)
-              ON CONFLICT (workspace_id) DO UPDATE SET provider = excluded.provider, model = excluded.model, api_key = excluded.api_key, auto_tasks = excluded.auto_tasks`)
-    .run(ctx.workspace.id, provider, model, apiKey, autoTasks);
+  // Move an older single saved key into the per-provider table.
+  if (cur.api_key) {
+    db.prepare(`INSERT OR IGNORE INTO ai_keys (workspace_id, provider, api_key) VALUES (?, ?, ?)`).run(ctx.workspace.id, cur.provider, cur.api_key);
+  }
+  if (body.clear_key) db.prepare(`DELETE FROM ai_keys WHERE workspace_id = ? AND provider = ?`).run(ctx.workspace.id, provider);
+  if (typeof body.api_key === 'string' && body.api_key.trim()) {
+    db.prepare(`INSERT INTO ai_keys (workspace_id, provider, api_key) VALUES (?, ?, ?) ON CONFLICT DO UPDATE SET api_key = excluded.api_key`)
+      .run(ctx.workspace.id, provider, seal(body.api_key.trim()));
+  }
+  db.prepare(`INSERT INTO ai_settings (workspace_id, provider, model, api_key, auto_tasks) VALUES (?, ?, ?, NULL, ?)
+              ON CONFLICT (workspace_id) DO UPDATE SET provider = excluded.provider, model = excluded.model, api_key = NULL, auto_tasks = excluded.auto_tasks`)
+    .run(ctx.workspace.id, provider, model, autoTasks);
   return { ok: true };
 }, { role: 'owner' });
 
@@ -475,7 +481,7 @@ on('POST', '/api/ai/test', async (ctx, p, body) => {
   const ai = {
     provider,
     model: str(body.model, 80) || (provider === base.provider ? base.model : PROVIDERS[provider].models[0]),
-    apiKey: typed || (provider === base.provider ? base.apiKey : process.env[PROVIDERS[provider].envKey]) || null,
+    apiKey: typed || savedKey(ctx.workspace.id, provider) || (provider === base.provider ? base.apiKey : process.env[PROVIDERS[provider].envKey]) || null,
   };
   try {
     const out = await testAI(ai);

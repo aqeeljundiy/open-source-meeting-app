@@ -150,6 +150,12 @@ db.exec(`
     api_key      TEXT,
     auto_tasks   INTEGER NOT NULL DEFAULT 1           -- 0 = notes only, no tasks
   );
+  CREATE TABLE IF NOT EXISTS ai_keys (
+    workspace_id TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+    provider     TEXT NOT NULL,
+    api_key      TEXT NOT NULL,                       -- encrypted (secrets.mjs)
+    PRIMARY KEY (workspace_id, provider)
+  );
   CREATE INDEX IF NOT EXISTS cal_start ON calendar_events(start_at);
   CREATE INDEX IF NOT EXISTS utt_meeting ON utterances(meeting_id, t_ms);
   CREATE INDEX IF NOT EXISTS meetings_ws ON meetings(workspace_id, created_at);

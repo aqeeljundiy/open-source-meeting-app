@@ -941,6 +941,8 @@ async function viewSettings() {
   }));
 }
 
+const keyPlaceholder = (p) => p.savedKey ? `Saved: ${p.savedKey} (leave empty to keep)` : p.serverKey ? 'Using the server key (paste one to override)' : p.keyHint;
+
 async function renderAICard(owner) {
   const a = await api('/api/ai').catch(() => null);
   if (!a || !$('#aiCard')) return;
@@ -954,7 +956,7 @@ async function renderAICard(owner) {
       <label>Model<select name="model_pick" ${owner ? '' : 'disabled'}>${p.models.map((m) => `<option ${m === a.model ? 'selected' : ''}>${esc(m)}</option>`).join('')}<option value="__custom" ${custom ? 'selected' : ''}>Other model…</option></select></label>
       <label class="ai-custom" ${custom ? '' : 'hidden'}>Model name<input name="model_custom" value="${custom ? esc(a.model) : ''}" placeholder="exact model id" ${owner ? '' : 'disabled'}></label>
       <label class="ai-key">API key
-        <input name="api_key" type="password" autocomplete="off" placeholder="${a.key ? `Saved: ${esc(a.key)} (leave empty to keep)` : a.keySource === 'server' ? 'Using the server key (paste one to override)' : esc(p.keyHint)}" ${owner ? '' : 'disabled'}>
+        <input name="api_key" type="password" autocomplete="off" placeholder="${esc(keyPlaceholder(p))}" ${owner ? '' : 'disabled'}>
       </label>
       <label class="switch-row"><span><b>Create tasks automatically</b><small>Off: the summary still lists action items, but no tasks are added.</small></span>
         <span class="switch"><input type="checkbox" name="auto_tasks" ${a.autoTasks ? 'checked' : ''} ${owner ? '' : 'disabled'}><span></span></span></label>
@@ -962,7 +964,7 @@ async function renderAICard(owner) {
       ${owner ? `<div class="row-end" style="justify-content:flex-start">
         <button class="btn btn-blue btn-sm" value="save">Save</button>
         <button class="btn btn-sm" value="test" type="button" id="aiTest">Test connection</button>
-        ${a.key ? '<button class="btn btn-sm btn-danger" type="button" id="aiClear">Remove saved key</button>' : ''}
+        <button class="btn btn-sm btn-danger" type="button" id="aiClear" ${p.savedKey ? '' : 'hidden'}>Remove saved key</button>
       </div>` : '<p class="muted small">Only owners can change the AI.</p>'}
     </form>`;
   const f = $('#aiForm');
@@ -971,8 +973,9 @@ async function renderAICard(owner) {
     const np = a.providers[f.provider.value];
     f.model_pick.innerHTML = np.models.map((m) => `<option>${esc(m)}</option>`).join('') + '<option value="__custom">Other model…</option>';
     $('.ai-custom', f).hidden = true;
-    f.api_key.placeholder = np.serverKey ? 'Using the server key (paste one to override)' : np.keyHint;
-    $('#aiMsg').textContent = f.provider.value !== a.provider ? 'Switching provider: paste that provider\'s API key, then Save.' : '';
+    f.api_key.placeholder = keyPlaceholder(np);
+    $('#aiMsg').textContent = f.provider.value !== a.provider && !np.savedKey && !np.serverKey ? 'Paste this provider\'s API key, then Save.' : '';
+    $('#aiClear') && ($('#aiClear').hidden = !np.savedKey);
   };
   f.model_pick.onchange = () => { $('.ai-custom', f).hidden = f.model_pick.value !== '__custom'; };
   const msg = (t, ok) => { $('#aiMsg').textContent = t; $('#aiMsg').style.color = ok ? 'var(--ok)' : ''; };
@@ -990,8 +993,8 @@ async function renderAICard(owner) {
     e.target.disabled = false;
   });
   $('#aiClear')?.addEventListener('click', attempt(async () => {
-    if (!confirm('Remove the saved API key?')) return;
-    await api('/api/ai', { method: 'PATCH', body: { clear_key: true } });
+    if (!confirm(`Remove the saved ${a.providers[f.provider.value].label} key?`)) return;
+    await api('/api/ai', { method: 'PATCH', body: { provider: f.provider.value, model: model(), clear_key: true } });
     toast('Key removed'); renderAICard(owner);
   }));
 }

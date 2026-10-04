@@ -30,6 +30,22 @@ export const PROVIDERS = {
     keyHint: 'sk-…  from platform.deepseek.com → API keys',
     base: 'https://api.deepseek.com',
   },
+  // Gateway: one key for many providers' models (OpenAI-compatible API).
+  sumopod: {
+    label: 'SumoPod (all models, one key)',
+    short: 'SumoPod',
+    models: [
+      'claude-opus-5-5', 'claude-sonnet-5', 'claude-haiku-4-5',
+      'gpt-5', 'gpt-5-mini',
+      'deepseek-v4-pro', 'deepseek-v4-flash',
+      'gemini/gemini-3.1-pro-preview', 'gemini/gemini-3.5-flash',
+      'qwen3.7-plus',
+    ],
+    envKey: 'SUMOPOD_API_KEY',
+    keyHint: 'sk-…  from sumopod.com → AI → API Keys',
+    base: 'https://ai.sumopod.com/v1',
+    gateway: true,
+  },
 };
 
 // The AI a workspace uses: its Settings choice, else Claude with the server's env key.
@@ -37,13 +53,21 @@ export function aiFor(workspaceId) {
   const row = workspaceId && db.prepare(`SELECT * FROM ai_settings WHERE workspace_id = ?`).get(workspaceId);
   const provider = PROVIDERS[row?.provider] ? row.provider : 'anthropic';
   const p = PROVIDERS[provider];
+  const saved = savedKey(workspaceId, provider) || (row?.api_key ? unseal(row.api_key) : null);   // ai_settings.api_key = older single-key storage
   return {
     provider,
     model: row?.model || p.models[0],
-    apiKey: unseal(row?.api_key) || process.env[p.envKey] || null,
-    keySource: unseal(row?.api_key) ? 'settings' : process.env[p.envKey] ? 'server' : null,
+    apiKey: saved || process.env[p.envKey] || null,
+    keySource: saved ? 'settings' : process.env[p.envKey] ? 'server' : null,
     autoTasks: row ? Boolean(row.auto_tasks) : true,
   };
+}
+
+// Each provider keeps its own key, so switching providers never loses one.
+export function savedKey(workspaceId, provider) {
+  if (!workspaceId) return null;
+  const k = db.prepare(`SELECT api_key FROM ai_keys WHERE workspace_id = ? AND provider = ?`).get(workspaceId, provider);
+  return k ? unseal(k.api_key) : null;
 }
 
 export class AIError extends Error {}
@@ -81,7 +105,7 @@ async function anthropicObject({ ai, system, prompt, schema, effort, maxTokens }
 async function openaiCompatibleObject({ ai, system, prompt, schema, name, maxTokens }) {
   const p = PROVIDERS[ai.provider];
   const jsonSchema = z.toJSONSchema(schema);
-  const isOpenAI = ai.provider === 'openai';
+  const isOpenAI = ai.provider === 'openai' || (p.gateway && !ai.jsonMode);
   const body = {
     model: ai.model,
     messages: [
@@ -91,7 +115,7 @@ async function openaiCompatibleObject({ ai, system, prompt, schema, name, maxTok
     response_format: isOpenAI
       ? { type: 'json_schema', json_schema: { name: name || 'result', schema: jsonSchema } }
       : { type: 'json_object' },
-    ...(isOpenAI ? { max_completion_tokens: maxTokens } : { max_tokens: Math.min(maxTokens, 8000) }),
+    ...(ai.provider === 'openai' ? { max_completion_tokens: maxTokens } : { max_tokens: p.gateway ? maxTokens : Math.min(maxTokens, 8000) }),
   };
   const res = await fetch(`${p.base}/chat/completions`, {
     method: 'POST',
@@ -99,6 +123,10 @@ async function openaiCompatibleObject({ ai, system, prompt, schema, name, maxTok
     body: JSON.stringify(body),
   });
   const data = await res.json().catch(() => ({}));
+  // Gateways route to many models; not all accept a JSON schema. Retry once in plain JSON mode.
+  if (!res.ok && p.gateway && !ai.jsonMode && res.status === 400 && /response_format|json_schema|schema/i.test(JSON.stringify(data))) {
+    return openaiCompatibleObject({ ai: { ...ai, jsonMode: true }, system, prompt, schema, name, maxTokens });
+  }
   if (!res.ok) throw new AIError(`${p.label}: ${data.error?.message || `HTTP ${res.status}`}`);
   const text = data.choices?.[0]?.message?.content;
   if (!text) throw new AIError(`${p.label} returned no result (${data.choices?.[0]?.finish_reason || 'empty'})`);
