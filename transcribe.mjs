@@ -53,6 +53,17 @@ export const TRANSCRIBERS = {
     base: 'https://api.openai.com/v1',
     model: 'whisper-1',
   },
+  // No Whisper on SumoPod (its audio endpoints are closed), but Gemini listens to audio through
+  // the normal chat API and is strong at Indonesian. Uses the same SumoPod key as the AI card.
+  sumopod: {
+    label: 'SumoPod: Gemini listens to the audio (uses your SumoPod key)',
+    short: 'SumoPod Gemini',
+    envKey: 'SUMOPOD_API_KEY',
+    keyHint: 'Uses the SumoPod key from the AI card (paste here only to change it)',
+    base: 'https://ai.sumopod.com/v1',
+    models: ['gemini/gemini-3.5-flash', 'gemini/gemini-3.1-pro-preview'],
+    modelLabels: { 'gemini/gemini-3.5-flash': 'Gemini 3.5 Flash (recommended: fast, cheap)', 'gemini/gemini-3.1-pro-preview': 'Gemini 3.1 Pro (slower, a little more accurate, costs more)' },
+  },
   deepgram: {
     label: 'Deepgram (about $0.26 to $0.35 per hour)',
     short: 'Deepgram',
@@ -61,17 +72,18 @@ export const TRANSCRIBERS = {
   },
 };
 // Keys live in ai_keys next to the AI keys; OpenAI shares the ChatGPT key.
-export const sttKeyName = (provider) => (provider === 'openai' ? 'openai' : `stt_${provider}`);
+export const sttKeyName = (provider) => (provider === 'openai' || provider === 'sumopod' ? provider : `stt_${provider}`);
 
 // The workspace's transcription choice (Settings → AI → Transcript).
 export function sttFor(workspaceId) {
-  const row = workspaceId && db.prepare(`SELECT language, stt_provider FROM ai_settings WHERE workspace_id = ?`).get(workspaceId);
+  const row = workspaceId && db.prepare(`SELECT language, stt_provider, stt_model FROM ai_settings WHERE workspace_id = ?`).get(workspaceId);
   const provider = TRANSCRIBERS[row?.stt_provider] ? row.stt_provider : null;
   const k = provider && db.prepare(`SELECT api_key FROM ai_keys WHERE workspace_id = ? AND provider = ?`).get(workspaceId, sttKeyName(provider));
   const saved = k ? unseal(k.api_key) : null;
   return {
     provider,
     language: LANGUAGES[row?.language] ? row.language : 'auto',
+    model: provider && TRANSCRIBERS[provider].models ? (TRANSCRIBERS[provider].models.includes(row?.stt_model) ? row.stt_model : TRANSCRIBERS[provider].models[0]) : null,
     apiKey: provider ? saved || process.env[TRANSCRIBERS[provider].envKey] || null : null,
     keySource: saved ? 'settings' : provider && process.env[TRANSCRIBERS[provider].envKey] ? 'server' : null,
   };
@@ -140,12 +152,14 @@ export async function fixPendingRecordings(recDir, log = console.log) {
   }
 }
 
-// Audio only, mono 16 kHz Opus, cut into pieces small enough for any provider's upload limit.
-async function audioChunks(file, chunkSec) {
+// Audio only, mono 16 kHz, cut into pieces small enough for any provider's upload limit.
+// Opus by default; MP3 for chat-style APIs, where it's the format every gateway accepts.
+async function audioChunks(file, chunkSec, format = 'ogg') {
   const dir = await mkdtemp(join(tmpdir(), 'mb-audio-'));
-  await run(FFMPEG, ['-hide_banner', '-v', 'error', '-y', '-i', file, '-vn', '-ac', '1', '-ar', '16000', '-c:a', 'libopus', '-b:a', '24k',
-    '-f', 'segment', '-segment_time', String(chunkSec), '-reset_timestamps', '1', join(dir, 'part%03d.ogg')]);
-  const files = (await readdir(dir)).filter((f) => f.endsWith('.ogg')).sort().map((f) => join(dir, f));
+  const codec = format === 'mp3' ? ['-c:a', 'libmp3lame', '-b:a', '32k'] : ['-c:a', 'libopus', '-b:a', '24k'];
+  await run(FFMPEG, ['-hide_banner', '-v', 'error', '-y', '-i', file, '-vn', '-ac', '1', '-ar', '16000', ...codec,
+    '-f', 'segment', '-segment_time', String(chunkSec), '-reset_timestamps', '1', join(dir, `part%03d.${format}`)]);
+  const files = (await readdir(dir)).filter((f) => f.endsWith(`.${format}`)).sort().map((f) => join(dir, f));
   return { dir, files };
 }
 
@@ -220,6 +234,59 @@ async function deepgram(apiKey, path, { language, prompt }) {
   return (data.results?.utterances || []).map((u) => ({ start: u.start, end: u.end, text: u.transcript?.trim(), dgSpeaker: u.speaker }));
 }
 
+// Gemini (through SumoPod's OpenAI-style chat API) hears the audio and writes the transcript as JSON.
+const toSec = (v) => {
+  if (typeof v === 'number') return v;
+  const p = String(v ?? '').trim().split(':').map(Number);
+  if (p.some((n) => !Number.isFinite(n))) return null;
+  return p.reduce((a, n) => a * 60 + n, 0);
+};
+export async function geminiChunk(t, apiKey, model, path, { language, prompt, durationSec }) {
+  const audio = (await readFile(path)).toString('base64');
+  const lang = language === 'auto' ? 'the language(s) spoken' : `${LANGUAGES[language].label.split(' (')[0]} (people may mix in English words or sentences: write those in English exactly as said)`;
+  const system = 'You are a precise meeting transcriber. You write down exactly what was said, word for word. You never translate, summarise, correct grammar or invent words.';
+  const text = `Transcribe this meeting recording (${Math.round(durationSec || 600)} seconds). Language: ${lang}.
+${prompt ? `People in the meeting (use these spellings for names): ${prompt}.
+` : ''}Rules:
+- One entry per sentence or short turn. Start a new entry whenever the speaker changes.
+- "start" = when the entry begins, as m:ss from the start of THIS audio.
+- "speaker" = a label per distinct voice: "A", "B", "C"... (same voice, same label). Use a real name only if someone is clearly addressed or introduces themselves by it.
+- Keep fillers out (eh, em, hmm) unless they carry meaning. Mark words you can't make out as [unclear].
+- Skip silence, music and background noise. If nobody speaks, return an empty list.
+Answer with JSON only: {"lines":[{"start":"0:04","speaker":"A","text":"..."}]}`;
+  const body = (part) => JSON.stringify({ model, temperature: 0, max_tokens: 16000, response_format: { type: 'json_object' },
+    messages: [{ role: 'system', content: system }, { role: 'user', content: [{ type: 'text', text }, part] }] });
+  // Gateways differ in how they take audio: OpenAI-style input_audio first, then a data-URL file part.
+  const parts = [
+    { type: 'input_audio', input_audio: { data: audio, format: 'mp3' } },
+    { type: 'file', file: { file_data: `data:audio/mpeg;base64,${audio}`, filename: 'audio.mp3' } },
+  ];
+  let lastErr;
+  for (const part of parts) {
+    for (let attempt = 1; attempt <= 3; attempt++) {
+      const res = await fetch(`${t.base}/chat/completions`, { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` }, body: body(part) });
+      const data = await res.json().catch(() => ({}));
+      if (res.ok) {
+        const out = data.choices?.[0]?.message?.content || '';
+        const json = out.slice(out.indexOf('{'), out.lastIndexOf('}') + 1);
+        let lines;
+        try { lines = JSON.parse(json).lines; } catch {
+          const arr = out.slice(out.indexOf('['), out.lastIndexOf(']') + 1);
+          try { lines = JSON.parse(arr); } catch { lastErr = new Error(`${t.short} did not return a readable transcript`); continue; }
+        }
+        if (!Array.isArray(lines)) { lastErr = new Error(`${t.short} did not return a transcript list`); continue; }
+        const segs = lines.map((l) => ({ start: toSec(l.start), text: String(l.text || '').trim(), label: String(l.speaker || '').trim() }))
+          .filter((l) => l.text && l.start != null).sort((a, b) => a.start - b.start);
+        return segs.map((s, i) => ({ start: s.start, end: Math.max(s.start + 0.5, Math.min(segs[i + 1]?.start ?? durationSec ?? s.start + 5, s.start + 60)), text: s.text, voice: s.label }));
+      }
+      lastErr = new Error(`${t.short}: ${data.error?.message || `HTTP ${res.status}`}`.slice(0, 300));
+      if (res.status === 429 || res.status >= 500) { await new Promise((r) => setTimeout(r, 5000 * attempt)); continue; }
+      break;   // 4xx: this way of sending audio isn't accepted; try the next one
+    }
+  }
+  throw lastErr;
+}
+
 // Who was talking at [start, end]? Caption lines (speaker + time) close to that window vote.
 function speakerAt(captions, startMs, endMs) {
   if (!captions.length) return null;
@@ -228,8 +295,8 @@ function speakerAt(captions, startMs, endMs) {
     if (c.t_ms < startMs - 4000) continue;
     if (c.t_ms > endMs + 1500) break;
     // Captions inside the window count fully; ones just before or after count less.
-    const gap = c.t_ms < startMs ? startMs - c.t_ms : c.t_ms > endMs ? c.t_ms - endMs : 0;
-    votes.set(c.speaker, (votes.get(c.speaker) || 0) + 1 / (1 + gap / 1000));
+    const w = c.t_ms < startMs ? 0.5 / (1 + (startMs - c.t_ms) / 500) : c.t_ms > endMs ? 0.3 / (1 + (c.t_ms - endMs) / 300) : 1;
+    votes.set(c.speaker, (votes.get(c.speaker) || 0) + w);
   }
   if (votes.size) return [...votes].sort((a, b) => b[1] - a[1])[0][0];
   // Nothing nearby: the last caption speaker before this line, if recent.
@@ -249,13 +316,15 @@ export async function transcribeRecording(file, stt, captions = [], { names = []
   const prompt = people.length ? people.join(', ') : '';
   // ElevenLabs takes up to 10 hours in one file (better speaker tracking); the others get 10-minute pieces.
   const chunkSec = stt.provider === 'elevenlabs' ? 36_000 : 600;
-  const { dir, files } = await audioChunks(file, chunkSec);
+  const { dir, files } = await audioChunks(file, chunkSec, stt.provider === 'sumopod' ? 'mp3' : 'ogg');
   try {
     const segs = [];
     for (const [i, part] of files.entries()) {
       log(`Transcribing part ${i + 1} of ${files.length} with ${t.short}`);
       const offset = i * chunkSec;
-      const got = stt.provider === 'deepgram' ? await deepgram(stt.apiKey, part, { language: stt.language, prompt })
+      const got = stt.provider === 'sumopod' ? (await geminiChunk(t, stt.apiKey, stt.model, part, { language: stt.language, prompt, durationSec: await durationSec(part) }))
+          .map((s) => ({ ...s, dgSpeaker: s.voice ? `${i}:${s.voice}` : null }))   // Gemini's voice labels only hold within one part
+        : stt.provider === 'deepgram' ? await deepgram(stt.apiKey, part, { language: stt.language, prompt })
         : stt.provider === 'elevenlabs' ? await elevenlabs(t, stt.apiKey, part, { language: stt.language })
         : await whisper(t, stt.apiKey, part, { language: stt.language, prompt });
       for (const s of got) segs.push({ ...s, start: s.start + offset, end: s.end + offset });
@@ -286,8 +355,9 @@ export async function transcribeRecording(file, stt, captions = [], { names = []
     const out = [];
     for (const s of clean) {
       const startMs = Math.round(s.start * 1000), endMs = Math.round(s.end * 1000);
-      const speaker = (s.dgSpeaker != null ? voiceName.get(s.dgSpeaker) || `Speaker ${s.dgSpeaker + 1}` : null)
-        || speakerAt(caps, startMs, endMs) || out.at(-1)?.speaker || 'Unknown';
+      const label = s.dgSpeaker == null ? null : typeof s.dgSpeaker === 'number' ? `Speaker ${s.dgSpeaker + 1}`
+        : ((v) => (/^[A-Z0-9]$/i.test(v) ? `Speaker ${v.toUpperCase()}` : v))(String(s.dgSpeaker).split(':').slice(1).join(':'));
+      const speaker = (s.dgSpeaker != null ? voiceName.get(s.dgSpeaker) : null) || speakerAt(caps, startMs, endMs) || label || out.at(-1)?.speaker || 'Unknown';
       const prev = out.at(-1);
       if (prev && prev.speaker === speaker && startMs - prev.endMs < 2500 && prev.text.length < 600) {
         prev.text += ` ${s.text}`;
@@ -295,6 +365,27 @@ export async function transcribeRecording(file, stt, captions = [], { names = []
       } else out.push({ speaker, text: s.text, t_ms: startMs, endMs });
     }
     return out.map(({ speaker, text, t_ms }) => ({ speaker, text, t_ms }));
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+}
+
+// "Test" in Settings: send 3 seconds of a tone and check the service answers without an error.
+export async function testTranscriber(stt) {
+  if (!(await hasFfmpeg())) throw new Error('ffmpeg is not installed on this server');
+  const t = TRANSCRIBERS[stt.provider];
+  const dir = await mkdtemp(join(tmpdir(), 'mb-stt-test-'));
+  try {
+    const format = stt.provider === 'sumopod' ? 'mp3' : 'ogg';
+    const file = join(dir, `test.${format}`);
+    await run(FFMPEG, ['-hide_banner', '-v', 'error', '-f', 'lavfi', '-i', 'sine=frequency=440:duration=3', '-ac', '1', '-ar', '16000',
+      ...(format === 'mp3' ? ['-c:a', 'libmp3lame', '-b:a', '32k'] : ['-c:a', 'libopus', '-b:a', '24k']), file]);
+    const opts = { language: stt.language, prompt: '', durationSec: 3 };
+    if (stt.provider === 'sumopod') await geminiChunk(t, stt.apiKey, stt.model, file, opts);
+    else if (stt.provider === 'elevenlabs') await elevenlabs(t, stt.apiKey, file, opts);
+    else if (stt.provider === 'deepgram') await deepgram(stt.apiKey, file, opts);
+    else await whisper(t, stt.apiKey, file, opts);
+    return `Connected: ${t.short}${stt.model ? ` (${stt.model})` : ''} accepted audio`;
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

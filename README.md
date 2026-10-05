@@ -6,7 +6,7 @@ captions into a transcript, and **Claude** writes the summary, action items and
 files the meeting into the right folder.
 
 - **Bot joins as an anonymous guest.** No Google or Zoom account, no Zoom SDK. Someone in the call clicks *Admit*.
-- **Transcript from the meeting's own captions** (with speaker names), or, for better accuracy in other languages (e.g. Indonesian), transcription of the recording with ElevenLabs Scribe, Groq Whisper, OpenAI Whisper or Deepgram (Settings → Transcript). Speaker names still come from the captions.
+- **Transcript from the meeting's own captions** (with speaker names), or, for better accuracy in other languages (e.g. Indonesian), transcription of the recording with Gemini through SumoPod, ElevenLabs Scribe, Groq Whisper, OpenAI Whisper or Deepgram (Settings → Transcript). Speaker names still come from the captions.
 - **Audio-only copy** of every recording next to the video, so the sound survives even if the video stutters.
 - **Notes with the AI you choose:** Claude, ChatGPT (OpenAI) or DeepSeek, set in Settings → AI. Summary, key points, decisions, open questions, topics.
 - **Tasks:** action items become tasks, matched to workspace members, with a link to the moment they were said.

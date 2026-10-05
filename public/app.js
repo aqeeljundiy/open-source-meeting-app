@@ -1047,6 +1047,7 @@ async function renderAICard(owner) {
   f.provider.onchange = () => {
     const np = a.providers[f.provider.value];
     f.model_pick.innerHTML = np.models.map((m) => `<option>${esc(m)}</option>`).join('') + '<option value="__custom">Other model…</option>';
+    f.model_pick.__mbSync?.();
     $('.ai-custom', f).hidden = true;
     f.api_key.placeholder = keyPlaceholder(np);
     $('#aiMsg').textContent = f.provider.value !== a.provider && !np.savedKey && !np.serverKey ? 'Paste this provider\'s API key, then Save.' : '';
@@ -1075,6 +1076,8 @@ async function renderAICard(owner) {
   renderSttCard(owner, a);
 }
 
+const modelOptions = (p, cur) => p.models.map((m) => `<option value="${esc(m)}" ${m === cur ? 'selected' : ''}>${esc(p.modelLabels?.[m] || m)}</option>`).join('');
+
 // Meeting language + optional transcription of the recording (Meet's captions are weak outside English).
 function renderSttCard(owner, a) {
   const t = a.transcript;
@@ -1090,6 +1093,7 @@ function renderSttCard(owner, a) {
         <option value="">Live captions only (free)</option>
         ${Object.entries(t.providers).map(([k, v]) => `<option value="${k}" ${k === t.provider ? 'selected' : ''}>${esc(v.label)}</option>`).join('')}
       </select></label>
+      <label class="stt-model" ${t.provider && sp(t.provider).models ? '' : 'hidden'}>Model<select name="stt_model" ${dis}>${t.provider && sp(t.provider).models ? modelOptions(sp(t.provider), t.model) : ''}</select></label>
       <label class="ai-key stt-key" ${t.provider ? '' : 'hidden'}>API key
         <input name="stt_api_key" type="password" autocomplete="off" placeholder="${t.provider ? esc(keyPlaceholder(sp(t.provider))) : ''}" ${dis}>
       </label>
@@ -1098,20 +1102,33 @@ function renderSttCard(owner, a) {
       <p class="form-error" id="sttMsg"></p>
       ${owner ? `<div class="row-end" style="justify-content:flex-start">
         <button class="btn btn-blue btn-sm">Save</button>
-        <button class="btn btn-sm btn-danger" type="button" id="sttClear" ${t.provider && sp(t.provider).savedKey ? '' : 'hidden'}>Remove saved key</button>
+        <button class="btn btn-sm" type="button" id="sttTest" ${t.provider ? '' : 'hidden'}>Test</button>
+        <button class="btn btn-sm btn-danger" type="button" id="sttClear" ${t.provider && sp(t.provider).savedKey && !sp(t.provider).shared ? '' : 'hidden'}>Remove saved key</button>
       </div>` : '<p class="muted small">Only owners can change this.</p>'}
     </form>`;
   const f = $('#sttForm');
+  const msg = (text, ok) => { $('#sttMsg').textContent = text; $('#sttMsg').style.color = ok ? 'var(--ok)' : ''; };
   f.stt_provider.onchange = () => {
     const k = f.stt_provider.value;
     $('.stt-key', f).hidden = !k;
+    $('.stt-model', f).hidden = !(k && sp(k).models);
+    if (k && sp(k).models) { f.stt_model.innerHTML = modelOptions(sp(k)); f.stt_model.__mbSync?.(); }
     if (k) f.stt_api_key.placeholder = keyPlaceholder(sp(k));
-    $('#sttClear') && ($('#sttClear').hidden = !(k && sp(k).savedKey));
-    $('#sttMsg').textContent = k && !sp(k).savedKey && !sp(k).serverKey ? 'Paste this service\'s API key, then Save.' : '';
+    $('#sttClear') && ($('#sttClear').hidden = !(k && sp(k).savedKey && !sp(k).shared));
+    $('#sttTest') && ($('#sttTest').hidden = !k);
+    msg(k && !sp(k).savedKey && !sp(k).serverKey ? 'Paste this service\'s API key, then Save.' : '');
   };
+  $('#sttTest')?.addEventListener('click', async (e) => {
+    e.target.disabled = true; msg('Testing…', true);
+    try {
+      const r = await api('/api/ai/stt-test', { body: { provider: f.stt_provider.value, model: f.stt_model.value, language: f.language.value, api_key: f.stt_api_key.value } });
+      msg(r.message, true);
+    } catch (err) { msg(err.message, false); }
+    e.target.disabled = false;
+  });
   f.addEventListener('submit', attempt(async (e) => {
     e.preventDefault();
-    await api('/api/ai', { method: 'PATCH', body: { language: f.language.value, stt_provider: f.stt_provider.value || null, stt_api_key: f.stt_api_key.value } });
+    await api('/api/ai', { method: 'PATCH', body: { language: f.language.value, stt_provider: f.stt_provider.value || null, stt_model: f.stt_model.value || null, stt_api_key: f.stt_api_key.value } });
     toast('Transcript settings saved'); renderAICard(owner);
   }));
   $('#sttClear')?.addEventListener('click', attempt(async () => {

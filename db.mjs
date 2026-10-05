@@ -207,6 +207,7 @@ for (const [name, type] of [['overview', 'TEXT'], ['overview_at', 'TEXT']]) {
   const ac = new Set(db.prepare(`PRAGMA table_info(ai_settings)`).all().map((c) => c.name));
   if (!ac.has('language')) db.exec(`ALTER TABLE ai_settings ADD COLUMN language TEXT`);
   if (!ac.has('stt_provider')) db.exec(`ALTER TABLE ai_settings ADD COLUMN stt_provider TEXT`);
+  if (!ac.has('stt_model')) db.exec(`ALTER TABLE ai_settings ADD COLUMN stt_model TEXT`);
 }
 
 // Per-workspace bot name (falls back to BOT_NAME / the brand's bot name).

@@ -13,7 +13,7 @@ const { finishMeeting, refreshFolderOverview } = await import('./pipeline.mjs');
 const { transcriptText, MEETING_TYPES } = await import('./summarize.mjs');
 const { PROVIDERS, aiFor, testAI, savedKey } = await import('./llm.mjs');
 const { seal, unseal, maskKey } = await import('./secrets.mjs');
-const { LANGUAGES, TRANSCRIBERS, sttFor, sttKeyName, hasFfmpeg, fixPendingRecordings } = await import('./transcribe.mjs');
+const { LANGUAGES, TRANSCRIBERS, sttFor, sttKeyName, hasFfmpeg, fixPendingRecordings, testTranscriber } = await import('./transcribe.mjs');
 const assistant = await import('./assistant.mjs');
 const demos = await import('./demo.mjs');
 const magic = await import('./magic.mjs');
@@ -524,11 +524,12 @@ on('GET', '/api/ai', async (ctx) => {
     provider: ai.provider, model: ai.model, autoTasks: ai.autoTasks,
     key: PROVIDERS[ai.provider] && ai.keySource === 'settings' ? maskKey(ai.apiKey) : null, keySource: ai.keySource,
     transcript: {
-      provider: stt.provider, language: stt.language, ffmpeg: await hasFfmpeg(),
+      provider: stt.provider, language: stt.language, model: stt.model, ffmpeg: await hasFfmpeg(),
       languages: Object.fromEntries(Object.entries(LANGUAGES).map(([k, l]) => [k, l.label])),
       providers: Object.fromEntries(Object.entries(TRANSCRIBERS).map(([k, t]) => {
         const saved = savedKey(ctx.workspace.id, sttKeyName(k));
-        return [k, { label: t.label, keyHint: t.keyHint, serverKey: Boolean(process.env[t.envKey]), savedKey: saved ? maskKey(saved) : null }];
+        return [k, { label: t.label, keyHint: t.keyHint, serverKey: Boolean(process.env[t.envKey]), savedKey: saved ? maskKey(saved) : null,
+          shared: !sttKeyName(k).startsWith('stt_'), models: t.models || null, modelLabels: t.modelLabels || null }];
       })),
     },
   };
@@ -553,15 +554,17 @@ on('PATCH', '/api/ai', (ctx, p, body) => {
   // Transcript: meeting language + optional transcription service and its key.
   const language = 'language' in body ? (LANGUAGES[body.language] ? body.language : 'auto') : cur.language ?? null;
   const stt = 'stt_provider' in body ? (TRANSCRIBERS[body.stt_provider] ? body.stt_provider : null) : cur.stt_provider ?? null;
-  if (body.stt_clear_key && TRANSCRIBERS[body.stt_clear_key]) db.prepare(`DELETE FROM ai_keys WHERE workspace_id = ? AND provider = ?`).run(ctx.workspace.id, sttKeyName(body.stt_clear_key));
+  // Keys shared with the AI card (OpenAI, SumoPod) are removed there, not here.
+  if (body.stt_clear_key && TRANSCRIBERS[body.stt_clear_key] && sttKeyName(body.stt_clear_key).startsWith('stt_')) db.prepare(`DELETE FROM ai_keys WHERE workspace_id = ? AND provider = ?`).run(ctx.workspace.id, sttKeyName(body.stt_clear_key));
   if (stt && typeof body.stt_api_key === 'string' && body.stt_api_key.trim()) {
     db.prepare(`INSERT INTO ai_keys (workspace_id, provider, api_key) VALUES (?, ?, ?) ON CONFLICT DO UPDATE SET api_key = excluded.api_key`)
       .run(ctx.workspace.id, sttKeyName(stt), seal(body.stt_api_key.trim()));
   }
-  db.prepare(`INSERT INTO ai_settings (workspace_id, provider, model, api_key, auto_tasks, language, stt_provider) VALUES (?, ?, ?, NULL, ?, ?, ?)
+  const sttModel = 'stt_model' in body ? (TRANSCRIBERS[stt]?.models?.includes(body.stt_model) ? body.stt_model : null) : cur.stt_model ?? null;
+  db.prepare(`INSERT INTO ai_settings (workspace_id, provider, model, api_key, auto_tasks, language, stt_provider, stt_model) VALUES (?, ?, ?, NULL, ?, ?, ?, ?)
               ON CONFLICT (workspace_id) DO UPDATE SET provider = excluded.provider, model = excluded.model, api_key = NULL, auto_tasks = excluded.auto_tasks,
-              language = excluded.language, stt_provider = excluded.stt_provider`)
-    .run(ctx.workspace.id, provider, model, autoTasks, language, stt);
+              language = excluded.language, stt_provider = excluded.stt_provider, stt_model = excluded.stt_model`)
+    .run(ctx.workspace.id, provider, model, autoTasks, language, stt, sttModel);
   return { ok: true };
 }, { role: 'owner' });
 
@@ -581,6 +584,22 @@ on('POST', '/api/ai/test', async (ctx, p, body) => {
   } catch (err) {
     throw new HttpError(400, err.message.slice(0, 300));
   }
+}, { role: 'owner' });
+
+// "Test" on the Transcript card: the typed key if given, else the saved/server key.
+on('POST', '/api/ai/stt-test', async (ctx, p, body) => {
+  const provider = TRANSCRIBERS[body.provider] ? body.provider : null;
+  if (!provider) throw new HttpError(400, 'Pick a transcription service first');
+  const t = TRANSCRIBERS[provider];
+  const typed = typeof body.api_key === 'string' && body.api_key.trim();
+  const stt = {
+    provider, language: LANGUAGES[body.language] ? body.language : 'auto',
+    model: t.models ? (t.models.includes(body.model) ? body.model : t.models[0]) : null,
+    apiKey: typed || savedKey(ctx.workspace.id, sttKeyName(provider)) || process.env[t.envKey] || null,
+  };
+  if (!stt.apiKey) throw new HttpError(400, `No ${t.short} key yet`);
+  try { return { ok: true, message: await testTranscriber(stt) }; }
+  catch (err) { throw new HttpError(400, err.message.slice(0, 300)); }
 }, { role: 'owner' });
 
 // Demo clients (files in demos/; the open-source repo ships none)
