@@ -39,6 +39,13 @@ export function transcriptText(utterances) {
   return utterances.map((u) => `[${fmt(u.t_ms)}] ${u.speaker || 'Unknown'}: ${u.text}`).join('\n');
 }
 
+const SYSTEM_NOTES =
+  'You write meeting notes from auto-generated captions. Captions can mis-hear words and names; ' +
+  'fix obvious errors silently, never invent facts that are not in the transcript. ' +
+  'Only list action items someone actually committed to or was asked to do. ' +
+  'Write the notes in the language the meeting was held in.';
+const CHUNK_CHARS = 40_000;   // ~25 minutes of talk per part; long meetings are summarized part by part
+
 export async function summarize(utterances, { title, folders = [], attendees = [], ai } = {}) {
   if (!utterances.length) return null;
   const context = [
@@ -46,14 +53,43 @@ export async function summarize(utterances, { title, folders = [], attendees = [
     attendees.length ? `Invited (from the calendar): ${attendees.map((a) => a.name ? `${a.name} <${a.email}>` : a.email).join(', ')}` : null,
     `Existing folders: ${folders.length ? folders.map((f) => `"${f}"`).join(', ') : '(none yet)'}`,
   ].filter(Boolean).join('\n');
+  const text = transcriptText(utterances);
+  if (text.length <= CHUNK_CHARS * 1.25) {
+    try {
+      return await generateObject({ ai, schema: Notes, name: 'meeting_notes', effort: 'medium', system: SYSTEM_NOTES, prompt: `${context}\n\n<transcript>\n${text}\n</transcript>` });
+    } catch (err) {
+      if (err.code !== 'too_long') throw err;   // answer got cut off: fall through to parts
+    }
+  }
+  return summarizeInParts(utterances, context, ai);
+}
+
+// Long meetings: notes per part, then one merge pass into the final notes.
+async function summarizeInParts(utterances, context, ai) {
+  const parts = [];
+  let cur = [], size = 0;
+  for (const u of utterances) {
+    const line = `[${fmt(u.t_ms)}] ${u.speaker || 'Unknown'}: ${u.text}\n`;
+    if (size + line.length > CHUNK_CHARS && cur.length) { parts.push(cur); cur = []; size = 0; }
+    cur.push(u); size += line.length;
+  }
+  if (cur.length) parts.push(cur);
+  const partNotes = [];
+  for (const [i, part] of parts.entries()) {
+    const from = fmt(part[0].t_ms), to = fmt(part.at(-1).t_ms);
+    partNotes.push(await generateObject({
+      ai, schema: Notes, name: 'meeting_notes_part', effort: 'low', maxTokens: 8000, system: SYSTEM_NOTES,
+      prompt: `${context}\n\nThis is part ${i + 1} of ${parts.length} of a long meeting (${from} to ${to}). Write notes for this part only.\n\n<transcript>\n${transcriptText(part)}\n</transcript>`,
+    }));
+  }
+  const digest = partNotes.map((n, i) => ({
+    part: i + 1, summary: n.summary, key_points: n.key_points, decisions: n.decisions,
+    action_items: n.action_items, open_questions: n.open_questions, topics: n.topics, tags: n.tags, folder: n.folder, meeting_type: n.meeting_type,
+  }));
   return generateObject({
     ai, schema: Notes, name: 'meeting_notes', effort: 'medium',
-    system:
-      'You write meeting notes from auto-generated captions. Captions can mis-hear words and names; ' +
-      'fix obvious errors silently, never invent facts that are not in the transcript. ' +
-      'Only list action items someone actually committed to or was asked to do. ' +
-      'Write the notes in the language the meeting was held in.',
-    prompt: `${context}\n\n<transcript>\n${transcriptText(utterances)}\n</transcript>`,
+    system: `${SYSTEM_NOTES} You are given notes for consecutive parts of one long meeting. Merge them into one set of notes for the whole meeting: remove duplicates, keep every distinct decision and action item (with its original mm:ss), and write one overall summary.`,
+    prompt: `${context}\n\n<part_notes>\n${JSON.stringify(digest)}\n</part_notes>`,
   });
 }
 

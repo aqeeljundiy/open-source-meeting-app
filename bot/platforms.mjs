@@ -229,8 +229,11 @@ export const meet = {
         const n = Number(((el.getAttribute('aria-label') || '') + ' ' + (el.textContent || '')).match(/\b(\d{1,3})\b/)?.[1]);
         if (n > counter) counter = n;
       }
-      const best = Math.max(ids.size, counter);
-      return best || null;
+      // Tiles only prove others are present: in Spotlight layout Meet draws a single tile even in a
+      // full meeting, so a low tile count must never be read as "alone". Unknown = stay.
+      if (counter > 0) return counter;
+      if (ids.size > 1) return ids.size;
+      return null;
     }).catch(() => null);
   },
 

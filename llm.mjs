@@ -129,12 +129,58 @@ async function openaiCompatibleObject({ ai, system, prompt, schema, name, maxTok
   }
   if (!res.ok) throw new AIError(`${p.label}: ${data.error?.message || `HTTP ${res.status}`}`);
   const text = data.choices?.[0]?.message?.content;
-  if (!text) throw new AIError(`${p.label} returned no result (${data.choices?.[0]?.finish_reason || 'empty'})`);
-  let parsed;
-  try { parsed = JSON.parse(text.replace(/^```(?:json)?\s*|\s*```$/g, '')); } catch { throw new AIError(`${p.label} did not return valid JSON`); }
-  const result = schema.safeParse(parsed);
-  if (!result.success) throw new AIError(`${p.label} returned JSON in the wrong shape: ${result.error.issues[0]?.path.join('.')} ${result.error.issues[0]?.message}`);
-  return result.data;
+  const finish = data.choices?.[0]?.finish_reason;
+  if (!text) throw new AIError(`${p.label} returned no result (${finish || 'empty'})`);
+  if (finish === 'length') throw Object.assign(new AIError(`${p.label} ran out of room before finishing its answer`), { code: 'too_long' });
+  const first = tolerantParse(text, schema, jsonSchema);
+  if (first.ok) return first.data;
+  // One repair round: hand the broken answer back and ask for clean JSON only.
+  if (!ai.repairing) {
+    const fixed = await openaiCompatibleObject({
+      ai: { ...ai, jsonMode: true, repairing: true }, name, maxTokens,
+      system: 'You repair malformed JSON. Return only the corrected JSON object, matching the schema. Keep all the content; do not add facts.',
+      prompt: `Problem: ${first.error}\n\nJSON Schema:\n${JSON.stringify(jsonSchema)}\n\nBroken answer:\n${text.slice(0, 60000)}`,
+      schema,
+    }).catch(() => null);
+    if (fixed) return fixed;
+  }
+  throw new AIError(`${p.label} did not return valid notes (${first.error})`);
+}
+
+// Accept answers wrapped in prose or code fences, and fill harmless gaps (a missing list
+// becomes [], a missing text becomes "") before validating against the schema.
+export function tolerantParse(text, schema, jsonSchema = z.toJSONSchema(schema)) {
+  let raw = String(text).replace(/^\s*```(?:json)?\s*/i, '').replace(/\s*```\s*$/, '');
+  let obj;
+  try { obj = JSON.parse(raw); } catch {
+    const a = raw.indexOf('{'), b = raw.lastIndexOf('}');
+    if (a < 0 || b <= a) return { ok: false, error: 'no JSON object in the answer' };
+    try { obj = JSON.parse(raw.slice(a, b + 1)); } catch (e) { return { ok: false, error: `invalid JSON (${e.message.slice(0, 80)})` }; }
+  }
+  const direct = schema.safeParse(obj);
+  if (direct.success) return { ok: true, data: direct.data };
+  const filled = schema.safeParse(fillDefaults(obj, jsonSchema));
+  if (filled.success) return { ok: true, data: filled.data };
+  const i = filled.error.issues[0];
+  return { ok: false, error: `wrong shape at ${i?.path.join('.') || 'root'}: ${i?.message}` };
+}
+
+function fillDefaults(v, js) {
+  if (!js) return v;
+  if (js.type === 'object' && js.properties) {
+    const o = v && typeof v === 'object' && !Array.isArray(v) ? { ...v } : {};
+    for (const [k, sub] of Object.entries(js.properties)) {
+      if (o[k] === undefined || o[k] === null) {
+        o[k] = sub.type === 'array' ? [] : sub.type === 'string' ? (sub.enum ? (sub.enum.includes('other') ? 'other' : sub.enum[0]) : '') : sub.type === 'boolean' ? false : sub.type === 'number' ? 0 : o[k];
+      }
+      o[k] = fillDefaults(o[k], sub);
+    }
+    return o;
+  }
+  if (js.type === 'array' && Array.isArray(v)) return v.map((x) => fillDefaults(typeof x === 'string' && js.items?.type === 'object' ? { [Object.keys(js.items.properties || {})[0]]: x } : x, js.items));
+  if (js.type === 'string' && typeof v !== 'string' && v != null) return js.enum && !js.enum.includes(String(v)) ? (js.enum.includes('other') ? 'other' : js.enum[0]) : String(v);
+  if (js.type === 'string' && js.enum && typeof v === 'string' && !js.enum.includes(v)) return js.enum.includes('other') ? 'other' : js.enum[0];
+  return v;
 }
 
 // Free-text chat (the Ask AI assistant). messages: [{ role: 'user' | 'assistant', content }].
