@@ -58,6 +58,9 @@ export async function stopRecorder(page) {
     const rec = window.__mbRecorder;
     if (rec && rec.state !== 'inactive') rec.stop();
     else window.__mbRecStopped?.();
+    const arec = window.__mbAudioRecorder;
+    if (arec && arec.state !== 'inactive') arec.stop();
+    else window.__mbAudioStopped?.();
   }).catch(() => {});
 }
 
@@ -343,29 +346,41 @@ export async function startCompositeRecorder(page, { video = true } = {}) {
         }
       };
       // Timers (not requestAnimationFrame): keep drawing even if the window is covered.
-      window.__mbDraw = setInterval(draw, 1000 / 20);
+      // 15 fps is plenty for a call and leaves CPU for the audio (which matters more).
+      window.__mbDraw = setInterval(draw, 1000 / 15);
       draw();
-      stream = new MediaStream([...c.captureStream(20).getVideoTracks(), ...dest.stream.getAudioTracks()]);
+      stream = new MediaStream([...c.captureStream(15).getVideoTracks(), ...dest.stream.getAudioTracks()]);
     }
 
     const mime = withVideo
       // VP8 first: VP9 costs 2-4x more CPU to encode live, which made recordings stutter on a busy server.
       ? ['video/webm;codecs=vp8,opus', 'video/webm;codecs=vp9,opus', 'video/webm'].find((m) => MediaRecorder.isTypeSupported(m))
       : 'audio/webm;codecs=opus';
-    const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 2_500_000, audioBitsPerSecond: 96_000 });
-    let queue = Promise.resolve();
-    rec.ondataavailable = (e) => {
-      if (!e.data.size) return;
-      queue = queue.then(async () => {
-        const buf = new Uint8Array(await e.data.arrayBuffer());
-        let bin = '';
-        for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
-        await window.__mbChunk(btoa(bin));
-      });
+    const send = (recorder, chunkFn, stoppedFn, onStop) => {
+      let queue = Promise.resolve();
+      recorder.ondataavailable = (e) => {
+        if (!e.data.size) return;
+        queue = queue.then(async () => {
+          const buf = new Uint8Array(await e.data.arrayBuffer());
+          let bin = '';
+          for (let i = 0; i < buf.length; i += 0x8000) bin += String.fromCharCode(...buf.subarray(i, i + 0x8000));
+          await window[chunkFn](btoa(bin));
+        });
+      };
+      recorder.onstop = () => { onStop?.(); queue.then(() => window[stoppedFn]()); };
     };
-    rec.onstop = () => { clearInterval(window.__mbDraw); queue.then(() => window.__mbRecStopped()); };
+    const rec = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 1_800_000, audioBitsPerSecond: 96_000 });
+    send(rec, '__mbChunk', '__mbRecStopped', () => clearInterval(window.__mbDraw));
     rec.start(5000);
     window.__mbRecorder = rec;
+    // A separate audio-only file: cheap to encode, so the sound survives even if the video stutters
+    // or breaks, and it's what gets transcribed.
+    if (withVideo && window.__mbAudioChunk) {
+      const arec = new MediaRecorder(new MediaStream(dest.stream.getAudioTracks()), { mimeType: 'audio/webm;codecs=opus', audioBitsPerSecond: 64_000 });
+      send(arec, '__mbAudioChunk', '__mbAudioStopped');
+      arec.start(5000);
+      window.__mbAudioRecorder = arec;
+    }
     return { mime, audioTracks: (window.__mbTracks || []).length, tabAudio: Boolean(window.__mbTabAudio), ctxState: ctx.state };
   }, video);
 }

@@ -202,12 +202,21 @@ for (const [name, type] of [['overview', 'TEXT'], ['overview_at', 'TEXT']]) {
   db.exec(`CREATE UNIQUE INDEX IF NOT EXISTS meetings_share ON meetings(share_token) WHERE share_token IS NOT NULL`);
 }
 
+// Meeting language + transcription service (Settings → AI → Transcript).
+{
+  const ac = new Set(db.prepare(`PRAGMA table_info(ai_settings)`).all().map((c) => c.name));
+  if (!ac.has('language')) db.exec(`ALTER TABLE ai_settings ADD COLUMN language TEXT`);
+  if (!ac.has('stt_provider')) db.exec(`ALTER TABLE ai_settings ADD COLUMN stt_provider TEXT`);
+}
+
 // Per-workspace bot name (falls back to BOT_NAME / the brand's bot name).
 if (!db.prepare(`PRAGMA table_info(workspaces)`).all().some((c) => c.name === 'bot_name')) db.exec(`ALTER TABLE workspaces ADD COLUMN bot_name TEXT`);
 
 // Older databases (pre-accounts) lack these columns.
 const cols = new Set(db.prepare(`PRAGMA table_info(meetings)`).all().map((c) => c.name));
-for (const [name, type] of [['workspace_id', 'TEXT'], ['created_by', 'TEXT'], ['folder_id', 'TEXT'], ['filed_by', 'TEXT'], ['meeting_type', 'TEXT'], ['tags', 'TEXT'], ['attendees', 'TEXT'], ['calendar_event', 'TEXT']]) {
+for (const [name, type] of [['workspace_id', 'TEXT'], ['created_by', 'TEXT'], ['folder_id', 'TEXT'], ['filed_by', 'TEXT'], ['meeting_type', 'TEXT'], ['tags', 'TEXT'], ['attendees', 'TEXT'], ['calendar_event', 'TEXT'],
+  // Recording remuxed for length + seeking (1 = done, 0 = failed), its real length, and where the transcript came from.
+  ['rec_fixed', 'INTEGER'], ['rec_seconds', 'REAL'], ['transcript_source', 'TEXT'], ['captions', 'TEXT']]) {
   if (!cols.has(name)) db.exec(`ALTER TABLE meetings ADD COLUMN ${name} ${type}`);
 }
 

@@ -13,6 +13,7 @@ const { finishMeeting, refreshFolderOverview } = await import('./pipeline.mjs');
 const { transcriptText, MEETING_TYPES } = await import('./summarize.mjs');
 const { PROVIDERS, aiFor, testAI, savedKey } = await import('./llm.mjs');
 const { seal, unseal, maskKey } = await import('./secrets.mjs');
+const { LANGUAGES, TRANSCRIBERS, sttFor, sttKeyName, hasFfmpeg, fixPendingRecordings } = await import('./transcribe.mjs');
 const assistant = await import('./assistant.mjs');
 const demos = await import('./demo.mjs');
 const magic = await import('./magic.mjs');
@@ -96,6 +97,10 @@ function meetingDetail(m) {
     tasks: q.meetingTasks.all(m.id),
     share: m.share_token ? { url: `${(process.env.PUBLIC_URL || '').replace(/\/$/, '')}/s/${m.share_token}`, opts: JSON.parse(m.share_opts || '{}') } : null,
     live: bots.has(m.id),
+    captions: undefined,
+    audio: m.recording && !bots.has(m.id) && (statSync(join(REC_DIR, m.recording.replace(/\.webm$/, '.audio.webm')), { throwIfNoEntry: false })?.size || 0) > 10_000
+      ? `/recordings/${m.recording.replace(/\.webm$/, '.audio.webm')}` : null,
+    stt: (({ provider, apiKey }) => provider && apiKey ? TRANSCRIBERS[provider].short : null)(sttFor(m.workspace_id)),
   };
 }
 
@@ -275,7 +280,7 @@ on('GET', '/api/meetings', (ctx, p, body, req) => {
     const like = `%${u.get('q').replace(/[%_]/g, '')}%`;
     args.push(like, like, like);
   }
-  const sql = `SELECT m.id, m.title, m.url, m.platform, m.status, m.error, m.recording, m.created_at, m.started_at, m.ended_at,
+  const sql = `SELECT m.id, m.title, m.url, m.platform, m.status, m.error, m.recording, m.rec_seconds, m.created_at, m.started_at, m.ended_at,
                  m.folder_id, m.filed_by, m.meeting_type, m.tags, f.name AS folder_name, f.color AS folder_color,
                  json_extract(m.summary, '$.title') AS ai_title,
                  (SELECT COUNT(*) FROM utterances x WHERE x.meeting_id = m.id) AS utterance_count,
@@ -334,9 +339,11 @@ on('POST', '/api/meetings/:id/stop', (ctx, p) => {
 }, { role: 'member' });
 
 // Re-run transcription fallback + notes + tasks + filing (e.g. after adding an API key).
-on('POST', '/api/meetings/:id/notes', (ctx, p) => {
+on('POST', '/api/meetings/:id/notes', (ctx, p, body) => {
   const m = ownMeeting(ctx, p.id);
   if (bots.has(m.id)) throw new HttpError(409, 'Meeting is still running');
+  // "Transcribe again": forget which service made the transcript so the current one runs.
+  if (body?.retranscribe) db.prepare(`UPDATE meetings SET transcript_source = NULL WHERE id = ?`).run(m.id);
   finishMeeting(m.id, (msg) => q.addEvent.run(m.id, msg), (s, e = null) => q.setStatus.run(s, e, m.id));
   return { ok: true };
 }, { role: 'member' });
@@ -344,7 +351,10 @@ on('POST', '/api/meetings/:id/notes', (ctx, p) => {
 on('DELETE', '/api/meetings/:id', async (ctx, p) => {
   const m = ownMeeting(ctx, p.id);
   bots.get(m.id)?.kill();
-  if (m.recording) await rm(join(REC_DIR, m.recording), { force: true });
+  if (m.recording) {
+    await rm(join(REC_DIR, m.recording), { force: true });
+    await rm(join(REC_DIR, m.recording.replace(/\.webm$/, '.audio.webm')), { force: true });
+  }
   q.deleteMeeting.run(m.id);
   return { ok: true };
 }, { role: 'member' });
@@ -503,8 +513,9 @@ on('DELETE', '/api/rules/:id', (ctx, p) => {
 
 // AI settings (per workspace): provider, model, API key, automatic tasks.
 const aiRow = db.prepare(`SELECT * FROM ai_settings WHERE workspace_id = ?`);
-on('GET', '/api/ai', (ctx) => {
+on('GET', '/api/ai', async (ctx) => {
   const ai = aiFor(ctx.workspace.id);
+  const stt = sttFor(ctx.workspace.id);
   return {
     providers: Object.fromEntries(Object.entries(PROVIDERS).map(([k, p]) => {
       const saved = savedKey(ctx.workspace.id, k) || (k === ai.provider && ai.keySource === 'settings' ? ai.apiKey : null);
@@ -512,6 +523,14 @@ on('GET', '/api/ai', (ctx) => {
     })),
     provider: ai.provider, model: ai.model, autoTasks: ai.autoTasks,
     key: PROVIDERS[ai.provider] && ai.keySource === 'settings' ? maskKey(ai.apiKey) : null, keySource: ai.keySource,
+    transcript: {
+      provider: stt.provider, language: stt.language, ffmpeg: await hasFfmpeg(),
+      languages: Object.fromEntries(Object.entries(LANGUAGES).map(([k, l]) => [k, l.label])),
+      providers: Object.fromEntries(Object.entries(TRANSCRIBERS).map(([k, t]) => {
+        const saved = savedKey(ctx.workspace.id, sttKeyName(k));
+        return [k, { label: t.label, keyHint: t.keyHint, serverKey: Boolean(process.env[t.envKey]), savedKey: saved ? maskKey(saved) : null }];
+      })),
+    },
   };
 });
 
@@ -531,9 +550,18 @@ on('PATCH', '/api/ai', (ctx, p, body) => {
     db.prepare(`INSERT INTO ai_keys (workspace_id, provider, api_key) VALUES (?, ?, ?) ON CONFLICT DO UPDATE SET api_key = excluded.api_key`)
       .run(ctx.workspace.id, provider, seal(body.api_key.trim()));
   }
-  db.prepare(`INSERT INTO ai_settings (workspace_id, provider, model, api_key, auto_tasks) VALUES (?, ?, ?, NULL, ?)
-              ON CONFLICT (workspace_id) DO UPDATE SET provider = excluded.provider, model = excluded.model, api_key = NULL, auto_tasks = excluded.auto_tasks`)
-    .run(ctx.workspace.id, provider, model, autoTasks);
+  // Transcript: meeting language + optional transcription service and its key.
+  const language = 'language' in body ? (LANGUAGES[body.language] ? body.language : 'auto') : cur.language ?? null;
+  const stt = 'stt_provider' in body ? (TRANSCRIBERS[body.stt_provider] ? body.stt_provider : null) : cur.stt_provider ?? null;
+  if (body.stt_clear_key && TRANSCRIBERS[body.stt_clear_key]) db.prepare(`DELETE FROM ai_keys WHERE workspace_id = ? AND provider = ?`).run(ctx.workspace.id, sttKeyName(body.stt_clear_key));
+  if (stt && typeof body.stt_api_key === 'string' && body.stt_api_key.trim()) {
+    db.prepare(`INSERT INTO ai_keys (workspace_id, provider, api_key) VALUES (?, ?, ?) ON CONFLICT DO UPDATE SET api_key = excluded.api_key`)
+      .run(ctx.workspace.id, sttKeyName(stt), seal(body.stt_api_key.trim()));
+  }
+  db.prepare(`INSERT INTO ai_settings (workspace_id, provider, model, api_key, auto_tasks, language, stt_provider) VALUES (?, ?, ?, NULL, ?, ?, ?)
+              ON CONFLICT (workspace_id) DO UPDATE SET provider = excluded.provider, model = excluded.model, api_key = NULL, auto_tasks = excluded.auto_tasks,
+              language = excluded.language, stt_provider = excluded.stt_provider`)
+    .run(ctx.workspace.id, provider, model, autoTasks, language, stt);
   return { ok: true };
 }, { role: 'owner' });
 
@@ -648,23 +676,24 @@ on('DELETE', '/api/tasks/:id', (ctx, p) => {
 
 // ---------- server ----------
 function serveRecording(req, res, ctx, file) {
-  const m = db.prepare(`SELECT workspace_id FROM meetings WHERE recording = ?`).get(file);
+  const m = db.prepare(`SELECT workspace_id FROM meetings WHERE recording = ?`).get(file.replace(/\.audio\.webm$/, '.webm'));
   if (!ctx?.workspace || !m || m.workspace_id !== ctx.workspace.id) return json(res, 404, { error: 'Not found' });
   streamWebm(req, res, file);
 }
 
 function streamWebm(req, res, file) {
   const path = join(REC_DIR, file);
-  if (!/^[\w-]+\.webm$/.test(file) || !existsSync(path)) return json(res, 404, { error: 'Not found' });
+  if (!/^[\w-]+(\.audio)?\.webm$/.test(file) || !existsSync(path)) return json(res, 404, { error: 'Not found' });
   const size = statSync(path).size;
+  const type = file.endsWith('.audio.webm') ? 'audio/webm' : 'video/webm';
   const range = req.headers.range?.match(/bytes=(\d*)-(\d*)/);
   if (range) {
     const start = range[1] ? Number(range[1]) : 0;
     const end = range[2] ? Math.min(Number(range[2]), size - 1) : size - 1;
-    res.writeHead(206, { 'Content-Type': 'video/webm', 'Accept-Ranges': 'bytes', 'Content-Range': `bytes ${start}-${end}/${size}`, 'Content-Length': end - start + 1 });
+    res.writeHead(206, { 'Content-Type': type, 'Accept-Ranges': 'bytes', 'Content-Range': `bytes ${start}-${end}/${size}`, 'Content-Length': end - start + 1 });
     return createReadStream(path, { start, end }).pipe(res);
   }
-  res.writeHead(200, { 'Content-Type': 'video/webm', 'Accept-Ranges': 'bytes', 'Content-Length': size });
+  res.writeHead(200, { 'Content-Type': type, 'Accept-Ranges': 'bytes', 'Content-Length': size });
   createReadStream(path).pipe(res);
 }
 
@@ -727,4 +756,6 @@ createServer((req, res) => handle(req, res).catch((err) => {
 })).listen(PORT, () => {
   console.log(`Meeting bot dashboard on http://localhost:${PORT}`);
   cal.startScheduler(launchBot);
+  // Older recordings: write their length + seek index (one at a time, in the background).
+  setTimeout(() => fixPendingRecordings(REC_DIR).catch((e) => console.error('fixPendingRecordings', e)), 5000);
 });

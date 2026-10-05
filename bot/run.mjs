@@ -10,6 +10,7 @@ import { q, REC_DIR } from '../db.mjs';
 import { platforms } from './platforms.mjs';
 import { startRecorder, stopRecorder, startCompositeRecorder, grabTabAudio, audioLevel, hookAudioTracks, captionSnapshot, CaptionAssembler } from './page.mjs';
 import { finishMeeting } from '../pipeline.mjs';
+import { sttFor, LANGUAGES } from '../transcribe.mjs';
 
 const id = process.argv[2];
 const meeting = q.getMeeting.get(id);
@@ -33,6 +34,7 @@ let profileDir;
 let recFile;
 let recStart = 0;
 let recDone;
+let audioDone;
 
 function chromePath() {
   return [process.env.CHROME_PATH, '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome', '/usr/bin/google-chrome-stable', '/usr/bin/google-chrome']
@@ -95,6 +97,12 @@ async function main() {
   recDone = new Promise((r) => { resolveRec = r; });
   await page.exposeFunction('__mbChunk', (b64) => { out.write(Buffer.from(b64, 'base64')); });
   await page.exposeFunction('__mbRecStopped', () => out.end(resolveRec));
+  // Audio-only safety copy (bot/page.mjs): <id>.audio.webm next to the video.
+  const audioOut = createWriteStream(join(REC_DIR, `${id}.audio.webm`));
+  let resolveAudio;
+  audioDone = new Promise((r) => { resolveAudio = r; });
+  await page.exposeFunction('__mbAudioChunk', (b64) => { audioOut.write(Buffer.from(b64, 'base64')); });
+  await page.exposeFunction('__mbAudioStopped', () => audioOut.end(resolveAudio));
   await page.exposeFunction('__mbRecState', (state, detail) => log(`Recorder ${state}: ${detail}`));
 
   await page.addInitScript(hookAudioTracks);
@@ -120,7 +128,8 @@ async function main() {
 
   log('Admitted to the meeting');
   await sleep(2000);
-  await platform.afterJoin(page, log);
+  const lang = sttFor(meeting.workspace_id).language;
+  await platform.afterJoin(page, log, { captionLanguage: LANGUAGES[lang]?.meet && lang !== 'en' ? { name: LANGUAGES[lang].label.split(' (')[0], pattern: LANGUAGES[lang].meet } : null });
   await platform.announce(page, `Hi, I'm ${meeting.bot_name}. I'm recording this meeting and taking notes.`, log);
 
   // Default: our own clean video built from the call's video feeds + mixed meeting audio.
@@ -190,7 +199,7 @@ async function main() {
 async function finish(page, finalStatus) {
   if (recStart) {
     await stopRecorder(page);
-    await Promise.race([recDone, sleep(15000)]);
+    await Promise.race([Promise.all([recDone, audioDone]), sleep(15000)]);
   }
   await platform.leave(page).catch(() => {});
   log('Left the meeting');
@@ -217,6 +226,7 @@ main()
   })
   .finally(() => {
     chromeProc?.kill();
-    if (profileDir) rmSync(profileDir, { recursive: true, force: true });
+    // Chrome may still be writing to its profile for a moment after being killed.
+    try { if (profileDir) rmSync(profileDir, { recursive: true, force: true, maxRetries: 5, retryDelay: 300 }); } catch {}
     process.exit(0);
   });

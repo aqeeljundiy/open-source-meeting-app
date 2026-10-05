@@ -1,11 +1,12 @@
 // After the bot leaves: make sure there's a transcript, write notes, create tasks, file the meeting.
-import { readFile, stat } from 'node:fs/promises';
+import { stat } from 'node:fs/promises';
 import { join } from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { q, REC_DIR } from './db.mjs';
 import { summarize, parseMmss, folderOverview } from './summarize.mjs';
 import { aiFor, PROVIDERS } from './llm.mjs';
 import { db } from './db.mjs';
+import { fixRecording, hasFfmpeg, hms, sttFor, transcribeRecording, TRANSCRIBERS, LANGUAGES } from './transcribe.mjs';
 
 const newId = () => randomUUID().replace(/-/g, '').slice(0, 10);
 
@@ -15,14 +16,53 @@ export async function finishMeeting(id, log, setStatus) {
     const m = q.getMeeting.get(id);
     let utterances = q.utterances.all(id);
 
-    // No captions came through (e.g. Zoom host disabled them): transcribe the recording.
-    if (!utterances.length && m.recording && process.env.DEEPGRAM_API_KEY) {
-      log('Transcribing the recording with Deepgram');
-      for (const u of await transcribeDeepgram(join(REC_DIR, m.recording))) {
-        q.addUtterance.run(id, u.speaker, u.text, u.t_ms);
+    // Make the recording seekable with its real length (browser recordings lack both).
+    if (m.recording && m.rec_fixed == null && await hasFfmpeg()) {
+      try {
+        const sec = await fixRecording(join(REC_DIR, m.recording));
+        db.prepare(`UPDATE meetings SET rec_fixed = 1, rec_seconds = ? WHERE id = ?`).run(sec, id);
+        if (sec) log(`Recording saved (${hms(sec)} long)`);
+        const audio = join(REC_DIR, m.recording.replace(/\.webm$/, '.audio.webm'));
+        if ((await stat(audio).catch(() => null))?.size > 10_000) {
+          const asec = await fixRecording(audio).catch(() => null);
+          if (asec) log(`Audio-only copy saved (${hms(asec)} long)`);
+        }
+      } catch (err) {
+        db.prepare(`UPDATE meetings SET rec_fixed = 0 WHERE id = ?`).run(id);
+        log(`Could not finish the recording file: ${err.message}`);
       }
-      utterances = q.utterances.all(id);
     }
+
+    // Transcribe the recording when the workspace chose a service (better than live captions for
+    // Indonesian and other languages), or when no captions came through at all.
+    const stt = sttFor(m.workspace_id);
+    if (!stt.provider && !utterances.length && process.env.DEEPGRAM_API_KEY) Object.assign(stt, { provider: 'deepgram', apiKey: process.env.DEEPGRAM_API_KEY });
+    if (m.recording && stt.provider && stt.apiKey && m.transcript_source !== stt.provider) {
+      const captions = m.captions ? JSON.parse(m.captions) : utterances;
+      try {
+        log(`Transcribing the recording with ${TRANSCRIBERS[stt.provider].short} (language: ${LANGUAGES[stt.language].label.split(' (')[0]})`);
+        const names = (m.attendees ? JSON.parse(m.attendees) : []).map((a) => a.name).filter(Boolean);
+        // The audio-only copy is smaller and keeps going even if the video broke.
+        const audio = join(REC_DIR, m.recording.replace(/\.webm$/, '.audio.webm'));
+        const source = (await stat(audio).catch(() => null))?.size > 10_000 ? audio : join(REC_DIR, m.recording);
+        const lines = await transcribeRecording(source, stt, captions, { names, log });
+        if (lines.length) {
+          db.exec('BEGIN');
+          try {
+            // Keep the caption lines: they give names to speakers if the meeting is transcribed again.
+            if (!m.captions) db.prepare(`UPDATE meetings SET captions = ? WHERE id = ?`).run(JSON.stringify(captions), id);
+            db.prepare(`DELETE FROM utterances WHERE meeting_id = ?`).run(id);
+            for (const u of lines) q.addUtterance.run(id, u.speaker, u.text, u.t_ms);
+            db.prepare(`UPDATE meetings SET transcript_source = ? WHERE id = ?`).run(stt.provider, id);
+            db.exec('COMMIT');
+          } catch (e) { db.exec('ROLLBACK'); throw e; }
+          utterances = q.utterances.all(id);
+          log(`Transcript from the recording replaces the live captions`);
+        } else log('The recording had no speech the transcription service could hear; kept the live captions');
+      } catch (err) {
+        log(`Transcription failed, kept the live captions: ${err.message}`);
+      }
+    } else if (m.recording && stt.provider && !stt.apiKey) log(`No ${TRANSCRIBERS[stt.provider].short} key (Settings → AI → Transcript), so the live captions are used`);
     log(`Transcript has ${utterances.length} lines`);
 
     if (!utterances.length) log('No transcript, so no notes');
@@ -126,23 +166,6 @@ export function fileMeeting(m, notes, log) {
   }
   q.setFiling.run(folderId, by, notes.meeting_type, JSON.stringify(notes.tags || []), m.id);
 }
-
-async function transcribeDeepgram(file) {
-  if (!(await stat(file).catch(() => null))?.size) return [];
-  const res = await fetch('https://api.deepgram.com/v1/listen?model=nova-3&smart_format=true&diarize=true&utterances=true&detect_language=true', {
-    method: 'POST',
-    headers: { Authorization: `Token ${process.env.DEEPGRAM_API_KEY}`, 'Content-Type': 'video/webm' },
-    body: await readFile(file),
-  });
-  if (!res.ok) throw new Error(`Deepgram ${res.status}: ${await res.text()}`);
-  const data = await res.json();
-  return (data.results?.utterances || []).map((u) => ({
-    speaker: `Speaker ${u.speaker + 1}`,
-    text: u.transcript,
-    t_ms: Math.round(u.start * 1000),
-  }));
-}
-
 
 // Re-summarize a folder from all its meetings' notes + tasks (called after each meeting, or on demand).
 export async function refreshFolderOverview(folderId) {

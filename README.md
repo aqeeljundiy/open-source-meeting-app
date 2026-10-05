@@ -6,7 +6,8 @@ captions into a transcript, and **Claude** writes the summary, action items and
 files the meeting into the right folder.
 
 - **Bot joins as an anonymous guest.** No Google or Zoom account, no Zoom SDK. Someone in the call clicks *Admit*.
-- **Transcript from the meeting's own captions** (with speaker names), plus optional Deepgram transcription when captions are off.
+- **Transcript from the meeting's own captions** (with speaker names), or, for better accuracy in other languages (e.g. Indonesian), transcription of the recording with ElevenLabs Scribe, Groq Whisper, OpenAI Whisper or Deepgram (Settings → Transcript). Speaker names still come from the captions.
+- **Audio-only copy** of every recording next to the video, so the sound survives even if the video stutters.
 - **Notes with the AI you choose:** Claude, ChatGPT (OpenAI) or DeepSeek, set in Settings → AI. Summary, key points, decisions, open questions, topics.
 - **Tasks:** action items become tasks, matched to workspace members, with a link to the moment they were said.
 - **Auto-folders:** Claude picks the meeting type, tags and folder; your rules (people, keywords, email domains) win.
@@ -55,7 +56,8 @@ Google Chrome must be installed. Bots open a visible Chrome window.
 | `OPEN_SIGNUP` | no | `1` lets anyone sign up. Default: only the first account, then invited emails |
 | `BOT_NAME` | no | Name the bot joins with (default `Notetaker`) |
 | `RECORD_VIDEO` | no | `0` = audio only (much lighter) |
-| `DEEPGRAM_API_KEY` | no | Transcribe the recording when a meeting has no captions |
+| `DEEPGRAM_API_KEY` | no | Transcribe the recording when a meeting has no captions (or pick Deepgram in Settings → Transcript) |
+| `ELEVENLABS_API_KEY`, `GROQ_API_KEY` | no | Server-wide keys for transcribing recordings (each workspace can also paste its own in Settings) |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | no | Google sign-in + Calendar auto-join |
 | `GOOGLE_LOGIN` | no | `0` hides "Continue with Google" (calendar connect still works) |
 | `ADMIT_TIMEOUT_MIN`, `ALONE_TIMEOUT_MIN`, `MAX_MEETING_MIN` | no | Bot timing |

@@ -10,6 +10,19 @@ const day = (s) => s ? new Date(s.replace(' ', 'T') + 'Z').toLocaleDateString([]
 // Brand (injected by the server into app.html; see brand.mjs).
 // Which AI the workspace uses (Settings → AI), for wording like "ChatGPT picks the folder".
 const aiName = () => me?.aiName || 'the AI';
+// Older browser recordings don't store their length, so players show a wrong, growing time.
+// Seeking far past the end makes the browser work out the real length, then jump back.
+function fixDuration(v) {
+  v?.addEventListener('loadedmetadata', function once() {
+    if (v.duration !== Infinity && !Number.isNaN(v.duration)) return;
+    v.addEventListener('durationchange', function back() {
+      if (v.duration === Infinity) return;
+      v.removeEventListener('durationchange', back);
+      v.currentTime = 0;
+    });
+    v.currentTime = 1e7;
+  }, { once: true });
+}
 const BRAND = window.__BRAND || { name: 'Meeting Bot', tagline: '', logo: null };
 const brandMark = () => `${BRAND.logo ? `<img class="logo" src="${esc(BRAND.logo)}" alt="">` : '<span class="mark">◆</span>'}<span class="bname"><span>${esc(BRAND.name)}</span>${BRAND.tagline ? `<small>${esc(BRAND.tagline)}</small>` : ''}</span>`;
 
@@ -600,6 +613,7 @@ function renderMeeting(m, members, fresh) {
       <div class="m-top">
         <div class="card video-card">
           <video id="video" controls preload="metadata" hidden></video>
+          <div class="audio-row" id="audioRow" hidden><span class="muted small">Audio only</span><audio id="audioOnly" controls preload="none"></audio><a class="btn btn-sm" id="audioDl" download>Download</a></div>
           <div class="video-empty" id="videoEmpty"><span>${ICON.meet}</span><b>No recording</b><small id="videoEmptyWhy">The recording appears here after the meeting.</small></div>
         </div>
         <div class="card glance" id="glance"></div>
@@ -671,13 +685,21 @@ function renderMeeting(m, members, fresh) {
 
   $('#mActions').innerHTML = `
     ${edit && m.live && !['stopping', 'processing'].includes(m.status) ? '<button class="btn btn-sm" id="stop">Make bot leave</button>' : ''}
-    ${edit && !m.live && (m.utterances.length || m.recording) && m.status !== 'processing' ? `<button class="btn btn-sm" id="renotes" title="Ask ${esc(aiName())} to write the summary and tasks again from the transcript">Regenerate notes</button>` : ''}
+    ${edit && !m.live && (m.utterances.length || m.recording) && m.status !== 'processing' ? (m.stt && m.recording && !m.transcript_source
+      ? `<button class="btn btn-sm" id="renotes" data-stt title="Transcribe the recording with ${esc(m.stt)}, then write the summary and tasks again">Transcribe and regenerate</button>`
+      : `<button class="btn btn-sm" id="renotes" title="Ask ${esc(aiName())} to write the summary and tasks again from the transcript">Regenerate notes</button>`) : ''}
+    ${edit && !m.live && m.stt && m.recording && m.transcript_source && m.status !== 'processing' ? `<button class="btn btn-sm" id="retranscribe" title="Transcribe the recording again with ${esc(m.stt)}, e.g. after changing the meeting language">Transcribe again</button>` : ''}
     ${edit ? `<button class="btn btn-sm" id="shareBtn">${m.share ? 'Shared' : 'Share'}</button>` : ''}
     ${edit ? '<button class="btn btn-sm btn-danger" id="del">Delete</button>' : ''}`;
   $('#stop')?.addEventListener('click', attempt(async () => { await api(`/api/meetings/${m.id}/stop`, { method: 'POST' }); route(); }));
   $('#renotes')?.addEventListener('click', attempt(async () => {
-    if (!confirm('Regenerate the summary and tasks from the transcript? Tasks you edited are kept.')) return;
+    const stt = $('#renotes').hasAttribute('data-stt');
+    if (!confirm(stt ? `Transcribe the recording with ${m.stt}, then regenerate the summary and tasks? Tasks you edited are kept. Long meetings take a few minutes.` : 'Regenerate the summary and tasks from the transcript? Tasks you edited are kept.')) return;
     await api(`/api/meetings/${m.id}/notes`, { method: 'POST' }); route();
+  }));
+  $('#retranscribe')?.addEventListener('click', attempt(async () => {
+    if (!confirm(`Transcribe the recording again with ${m.stt} and regenerate the notes? Tasks you edited are kept.`)) return;
+    await api(`/api/meetings/${m.id}/notes`, { body: { retranscribe: true } }); route();
   }));
   $('#shareBtn')?.addEventListener('click', () => openShare(m));
   $('#del')?.addEventListener('click', attempt(async () => {
@@ -690,6 +712,8 @@ function renderMeeting(m, members, fresh) {
     $('#video').hidden = false;
     $('#videoEmpty').hidden = true;
     $('#video').src = `/recordings/${m.recording}`;
+    fixDuration($('#video'));
+    if (m.audio) { $('#audioRow').hidden = false; $('#audioOnly').src = m.audio; $('#audioDl').href = m.audio; fixDuration($('#audioOnly')); }
   } else if (!m.recording) {
     $('#videoEmptyWhy').textContent = m.live ? 'Recording in progress. It appears here when the meeting ends.' : 'There is no recording for this meeting.';
   }
@@ -885,6 +909,7 @@ async function viewSettings() {
         ${me.singleWorkspace ? '' : '<p class="muted small">Use one workspace per company or team. Meetings, folders and tasks stay inside their workspace.</p>'}
       </section>
       <section class="card" id="aiCard"><h2>AI</h2><p class="muted">Loading…</p></section>
+      <section class="card" id="sttCard"><h2>Transcript</h2><p class="muted">Loading…</p></section>
       ${owner ? '<section class="card" id="demoCard" hidden></section>' : ''}
       <section class="card">
         <h2>Meeting bot</h2>
@@ -1047,6 +1072,54 @@ async function renderAICard(owner) {
     await api('/api/ai', { method: 'PATCH', body: { provider: f.provider.value, model: model(), clear_key: true } });
     toast('Key removed'); renderAICard(owner);
   }));
+  renderSttCard(owner, a);
+}
+
+// Meeting language + optional transcription of the recording (Meet's captions are weak outside English).
+function renderSttCard(owner, a) {
+  const t = a.transcript;
+  if (!t || !$('#sttCard')) return;
+  const dis = owner ? '' : 'disabled';
+  const sp = (k) => t.providers[k];
+  $('#sttCard').innerHTML = `
+    <h2>Transcript</h2>
+    <p class="muted small">By default the transcript comes from the meeting's live captions. They work well in English but often mis-hear other languages, such as Indonesian or Indonesian mixed with English. For those, let a speech-to-text service transcribe the recording after the meeting. Speaker names still come from the captions.</p>
+    <form id="sttForm" class="ai-form">
+      <label>Meeting language<select name="language" ${dis}>${Object.entries(t.languages).map(([k, l]) => `<option value="${k}" ${k === t.language ? 'selected' : ''}>${esc(l)}</option>`).join('')}</select></label>
+      <label>Transcribe with<select name="stt_provider" ${dis}>
+        <option value="">Live captions only (free)</option>
+        ${Object.entries(t.providers).map(([k, v]) => `<option value="${k}" ${k === t.provider ? 'selected' : ''}>${esc(v.label)}</option>`).join('')}
+      </select></label>
+      <label class="ai-key stt-key" ${t.provider ? '' : 'hidden'}>API key
+        <input name="stt_api_key" type="password" autocomplete="off" placeholder="${t.provider ? esc(keyPlaceholder(sp(t.provider))) : ''}" ${dis}>
+      </label>
+      ${t.ffmpeg ? '' : '<p class="form-error">This server has no ffmpeg, so recordings can\'t be transcribed. Rebuild with the current Dockerfile.</p>'}
+      <p class="muted small">The bot also asks Meet to caption in the meeting language. Older meetings: open one and click "Transcribe and regenerate".</p>
+      <p class="form-error" id="sttMsg"></p>
+      ${owner ? `<div class="row-end" style="justify-content:flex-start">
+        <button class="btn btn-blue btn-sm">Save</button>
+        <button class="btn btn-sm btn-danger" type="button" id="sttClear" ${t.provider && sp(t.provider).savedKey ? '' : 'hidden'}>Remove saved key</button>
+      </div>` : '<p class="muted small">Only owners can change this.</p>'}
+    </form>`;
+  const f = $('#sttForm');
+  f.stt_provider.onchange = () => {
+    const k = f.stt_provider.value;
+    $('.stt-key', f).hidden = !k;
+    if (k) f.stt_api_key.placeholder = keyPlaceholder(sp(k));
+    $('#sttClear') && ($('#sttClear').hidden = !(k && sp(k).savedKey));
+    $('#sttMsg').textContent = k && !sp(k).savedKey && !sp(k).serverKey ? 'Paste this service\'s API key, then Save.' : '';
+  };
+  f.addEventListener('submit', attempt(async (e) => {
+    e.preventDefault();
+    await api('/api/ai', { method: 'PATCH', body: { language: f.language.value, stt_provider: f.stt_provider.value || null, stt_api_key: f.stt_api_key.value } });
+    toast('Transcript settings saved'); renderAICard(owner);
+  }));
+  $('#sttClear')?.addEventListener('click', attempt(async () => {
+    const k = f.stt_provider.value;
+    if (!confirm(`Remove the saved ${sp(k).label.split(' (')[0]} key?`)) return;
+    await api('/api/ai', { method: 'PATCH', body: { stt_clear_key: k } });
+    toast('Key removed'); renderAICard(owner);
+  }));
 }
 
 function viewMissing() {
@@ -1171,7 +1244,7 @@ async function viewShared(token) {
     </div>`;
   const v = $('#video');
   if (v) {
-    v.addEventListener('loadedmetadata', () => { if (v.duration === Infinity) { v.addEventListener('timeupdate', function back() { v.removeEventListener('timeupdate', back); v.currentTime = 0; }); v.currentTime = 1e101; } });
+    fixDuration(v);
     $$('.utt').forEach((u) => u.onclick = () => { v.currentTime = Number(u.dataset.t) / 1000; v.play(); });
   }
 }

@@ -526,3 +526,8 @@ video { width: 100%; border-radius: 14px; background: #000; aspect-ratio: 16/9; 
 .shared-task.done .tick { background: var(--accent); border-color: var(--accent); }
 .shared-task.done > span:last-child { text-decoration: line-through; color: var(--muted); }
 .shared .notes .lead { margin: 0 0 18px; }
+
+/* Audio-only copy of the recording, under the video */
+.audio-row { display: flex; align-items: center; gap: 10px; padding: 10px 12px; }
+.audio-row audio { flex: 1; min-width: 0; height: 36px; }
+.audio-row[hidden] { display: none; }

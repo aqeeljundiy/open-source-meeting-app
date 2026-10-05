@@ -193,7 +193,7 @@ export const meet = {
     }
   },
 
-  async afterJoin(page, log) {
+  async afterJoin(page, log, { captionLanguage } = {}) {
     await this.ensureMuted(page, log);
     await dismissMeetDialogs(page, log);
     await this.spotlight(page, log);
@@ -201,6 +201,35 @@ export const meet = {
     const on = await clickButton(page, [/Turn on captions/i], { timeout: 8000 });
     if (!on) await page.keyboard.press('c');
     log(on ? 'Captions turned on' : 'Captions toggled with keyboard shortcut');
+    if (captionLanguage) await this.captionLanguage(page, captionLanguage, log);
+  },
+
+  // Meet captions in English unless told otherwise: More options → Settings → Captions → Meeting language.
+  async captionLanguage(page, { name, pattern }, log) {
+    try {
+      if (!(await clickButton(page, [/^More options$/i], { timeout: 4000 }))) throw new Error('no menu');
+      const item = page.getByRole('menuitem', { name: /Settings$/i }).first();
+      await item.waitFor({ timeout: 3000 });
+      await item.click();
+      const tab = page.getByRole('tab', { name: /Captions/i }).first();
+      await tab.waitFor({ timeout: 4000 });
+      await tab.click();
+      const box = page.getByRole('combobox', { name: /Meeting language|Language of the meeting|Language/i }).first();
+      await box.waitFor({ timeout: 4000 });
+      if (pattern.test((await box.innerText().catch(() => '')).trim())) { log(`Captions already in ${name}`); }
+      else {
+        await box.click();
+        const opt = page.getByRole('option', { name: pattern }).first();
+        await opt.waitFor({ timeout: 4000 });
+        await opt.click();
+        log(`Captions set to ${name}`);
+      }
+      await page.keyboard.press('Escape');
+      await clickButton(page, [/^Close dialog$/i, /^Close$/i]);
+    } catch {
+      await page.keyboard.press('Escape').catch(() => {});
+      log(`Could not set the caption language to ${name} (captions stay in Meet's default)`);
+    }
   },
 
   async announce(page, message, log) {
